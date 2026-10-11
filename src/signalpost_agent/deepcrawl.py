@@ -38,6 +38,58 @@ def _page_kind(url: str, title: str) -> str:
     return "general"
 
 
+def _distinctive_name(legal_name: str) -> str:
+    """Strip Norwegian legal-form suffixes for content matching."""
+    name = legal_name.strip()
+    upper = name.upper()
+    for suffix in (" ASA", " AS", " ENK", " DA", " ANS", " BA", " SA", " KF", " SF", " IKS", " NUF"):
+        if upper.endswith(suffix):
+            return name[: -len(suffix)].strip()
+    return name
+
+
+GENERIC_TOKENS = {
+    "BORETTSLAG", "SAMEIE", "EIENDOM", "HOLDING", "INVEST", "GRUPPEN",
+    "NORGE", "NORSK", "NORWAY", "AS", "ASA", "ENK", "DA", "ANS",
+}
+
+
+def _content_verified(org_number: str, legal_name: str, text: str) -> bool:
+    """Does this text represent the company (not a parent/franchisor/provider)?
+
+    Requires the org number, the full distinctive name, or a significant
+    name token (len>=4, not generic like BORETTSLAG/HOLDING) in the text.
+    """
+    digits = re.sub(r"\D", "", org_number)
+    if digits and digits in text:
+        return True
+    distinctive = _distinctive_name(legal_name)
+    low = text.casefold()
+    if len(distinctive) > 3 and distinctive.casefold() in low:
+        return True
+    for token in re.split(r"\W+", distinctive.upper()):
+        # len>=5: 4-letter tokens collide with common Norwegian words (ALLE, MED...)
+        if len(token) >= 5 and token not in GENERIC_TOKENS and token in text.upper():
+            return True
+    return False
+
+
+def site_content_verified(org_number: str, legal_name: str, pages: list[dict[str, Any]]) -> bool:
+    """Site-level check: does ANY crawled page represent the company?
+
+    A single news article may not mention the company, but if the homepage or
+    another page does, the site is the company's (not a franchisor/provider).
+    """
+    combined = "\n".join(p.get("main_text_excerpt", "") + " " + p.get("title", "") for p in pages)
+    return _content_verified(org_number, legal_name, combined)
+    hay = f"{url} {title}".casefold()
+    if any(h in hay for h in CAREER_HINTS):
+        return "career"
+    if any(h in hay for h in NEWS_HINTS):
+        return "news"
+    return "general"
+
+
 def extract_facts(
     org_number: str,
     legal_name: str,
@@ -56,6 +108,9 @@ def extract_facts(
     news_urls: list[str] = []
     seen_emails: set[str] = set()
     seen_phones: set[str] = set()
+    # Site-level content verification (computed once): if no crawled page
+    # represents the company, the site may belong to a franchisor/provider.
+    site_ok = site_content_verified(org_number, legal_name, pages)
 
     for page in pages:
         url = page.get("url", "")
@@ -64,6 +119,10 @@ def extract_facts(
         gate = assess_candidate(org_number, legal_name, registry_domain, url, text)
         if gate["verdict"] != "exact":
             continue  # never publish from an unverified page
+        # Site-level content check: domain match alone is not enough (franchisor /
+        # provider / acquirer pages). If no crawled page represents the company,
+        # facts abstain as ambiguous.
+        verdict = "exact" if site_ok else "ambiguous"
         kind = _page_kind(url, title)
         if kind == "career" and url not in career_urls:
             career_urls.append(url)
@@ -75,7 +134,7 @@ def extract_facts(
                 if email not in seen_emails and not email.endswith((".png", ".jpg")):
                     seen_emails.add(email)
                     facts.append({"field": "contact_email", "value": email,
-                                  "evidence_url": url, "verdict": "exact"})
+                                  "evidence_url": url, "verdict": verdict})
             for phone in PHONE_RE.findall(text):
                 digits = re.sub(r"\D", "", phone)
                 # reject year ranges like 2002-2005 (false positive)
@@ -84,16 +143,24 @@ def extract_facts(
                 if len(digits) in (8, 10) and phone not in seen_phones:
                     seen_phones.add(phone)
                     facts.append({"field": "contact_phone", "value": phone.strip(),
-                                  "evidence_url": url, "verdict": "exact"})
+                                  "evidence_url": url, "verdict": verdict})
 
-    # longest about/services text for synthesis (T3.1)
+    # longest about/services text for synthesis (T3.1) — only when the site
+    # is content-verified, else abstain
     about_text = ""
+    about_url = ""
+    about_verdict = "ambiguous"
     for page in pages:
         t = page.get("main_text_excerpt", "")
         if len(t) > len(about_text):
-            about_text = t
+            url = page.get("url", "")
+            gate = assess_candidate(org_number, legal_name, registry_domain, url, t)
+            if gate["verdict"] == "exact":
+                about_text = t
+                about_url = url
+                about_verdict = "exact" if site_ok else "ambiguous"
     if about_text:
         facts.append({"field": "about_text", "value": about_text[:3000],
-                      "evidence_url": pages[0].get("url", ""), "verdict": "exact"})
+                      "evidence_url": about_url, "verdict": about_verdict})
 
     return {"facts": facts, "career_urls": career_urls, "news_urls": news_urls}

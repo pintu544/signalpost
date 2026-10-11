@@ -34,11 +34,17 @@ def enrich_recall(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, in
 
     # T2.1 — website deep crawl (structured facts from already-crawled pages)
     deep = extract_facts(org, legal_name, registry_domain, website_record)
-    if deep["facts"] or deep["career_urls"] or deep["news_urls"]:
+    # Only EXACT-verdict facts are published; AMBIGUOUS ones are recorded for
+    # audit but never become claims (franchisor/provider/acquirer trap).
+    exact_facts = [f for f in deep["facts"] if f["verdict"] == "exact"]
+    ambiguous_facts = [f for f in deep["facts"] if f["verdict"] != "exact"]
+    deep_value = {"facts": exact_facts, "ambiguous_facts": ambiguous_facts,
+                  "career_urls": deep["career_urls"], "news_urls": deep["news_urls"]}
+    if exact_facts or deep["career_urls"] or deep["news_urls"]:
         records["website_deep"] = _evidence_record(
             "website_deep", "available", "registry_linked_company_website",
             website_value.get("final_url", ""),
-            value=deep, note="Structured facts from verified company site pages")
+            value=deep_value, note="Structured facts from verified company site pages")
     else:
         records["website_deep"] = _evidence_record(
             "website_deep", "not_found", "registry_linked_company_website",
@@ -78,7 +84,8 @@ def enrich_recall(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, in
     # marker record so resume/profile_complete_for_modules sees the recall module
     records["recall"] = _evidence_record(
         "recall", "available", "signalpost_agent", "",
-        value={"website_deep_facts": len(deep["facts"]),
+        value={"website_deep_facts": len(exact_facts),
+               "website_deep_ambiguous": len(ambiguous_facts),
                "news_items": len(news["items"]),
                "jobs": len(jobs["jobs"])},
         note="Slice 2 recall connectors completed")
