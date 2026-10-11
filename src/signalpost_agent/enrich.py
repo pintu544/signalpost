@@ -46,9 +46,11 @@ def enrich_recall(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, in
             website_value.get("final_url", ""),
             value=deep_value, note="Structured facts from verified company site pages")
     else:
+        # keep ambiguous facts for audit even when nothing is publishable
         records["website_deep"] = _evidence_record(
             "website_deep", "not_found", "registry_linked_company_website",
-            website_value.get("final_url", ""), note="No structured facts extracted")
+            website_value.get("final_url", ""), value=deep_value,
+            note="No publishable facts; ambiguous candidates withheld")
 
     # T2.2 — news signals
     news = fetch_news(org, legal_name)
