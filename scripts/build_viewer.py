@@ -80,12 +80,16 @@ function renderList(filter){
   list.querySelectorAll('.card').forEach(c => c.onclick = () => showDetail(+c.dataset.i));
 }
 function esc(s){return String(s??'').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
+// C2 fix: only http(s) URLs become links; anything else (javascript:, data:)
+// renders as plain text — evidence URLs come from crawled/RSS sources.
+function safeUrl(u){try{const p=new URL(u,location.href).protocol;return (p==='http:'||p==='https:')?u:null;}catch(e){return null;}}
 function showDetail(i){
   const p = DATA.profiles[i];
   list.style.display='none'; detail.style.display='block';
   detail.innerHTML = `<span class="back" onclick="back()">← all companies</span><h2 style="margin-bottom:1rem">${esc(p.name)} <span style="color:var(--muted);font-weight:normal">${esc(p.organisation_number)}</span></h2>` +
-    p.sections.map(s => `<div class="sec"><h2>${esc(s.title)}</h2>` + s.sentences.map(x =>
-      `<p>${esc(x.text)}<div class="ev">source: ${esc(x.evidence[0]?.source||'n/a')} · retrieved ${esc((x.evidence[0]?.retrieved_at||'').slice(0,10))}${x.evidence[0]?.url?` · <a href="${esc(x.evidence[0].url)}" target="_blank" rel="noopener">source link</a>`:''}</div></p>`).join('') + `</div>`).join('');
+    p.sections.map(s => `<div class="sec"><h2>${esc(s.title)}</h2>` + s.sentences.map(x => {
+      const u = x.evidence[0]?.url, link = u && safeUrl(u) ? ` · <a href="${esc(u)}" target="_blank" rel="noopener">source link</a>` : (u ? ` · <span title="non-http URL withheld">${esc(u.slice(0,40))}</span>` : '');
+      return `<p>${esc(x.text)}<div class="ev">source: ${esc(x.evidence[0]?.source||'n/a')} · retrieved ${esc((x.evidence[0]?.retrieved_at||'').slice(0,10))}${link}</div></p>`;}).join('') + `</div>`).join('');
   window.scrollTo(0,0);
 }
 function back(){ renderList(search.value); }
@@ -118,7 +122,11 @@ def main() -> None:
     }
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    page = PAGE_TEMPLATE.replace("__DATA__", json.dumps(payload, ensure_ascii=False))
+    # C1 fix: escape < as \u003c so crawled text containing </script> cannot
+    # break out of the <script> block (stored XSS via attacker-influenced
+    # company website content).
+    data_json = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c")
+    page = PAGE_TEMPLATE.replace("__DATA__", data_json)
     (out / "index.html").write_text(page, encoding="utf-8")
     print(f"viewer: {len(profiles)} profiles -> {out / 'index.html'}")
 

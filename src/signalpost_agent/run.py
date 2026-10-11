@@ -94,8 +94,14 @@ def main() -> None:
     except SystemExit as exc:
         if exc.code not in (0, None):
             raise
-    # Slice 3: snapshot store (idempotent refresh) + static viewer
-    _post_process(out, args.run_id)
+    # Slice 3: snapshot store (idempotent refresh) + static viewer.
+    # W3: these are nice-to-have — a viewer/snapshot bug must never void an
+    # otherwise valid envelope run.
+    try:
+        _post_process(out, args.run_id)
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARNING: post-processing failed ({type(exc).__name__}: {exc}); "
+              f"envelopes and report are complete.", flush=True)
 
 
 def _post_process(out: Path, run_id: str) -> None:
