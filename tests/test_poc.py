@@ -886,7 +886,9 @@ class WebsiteTests(unittest.TestCase):
 
     def test_priority_pages_stay_on_exact_site(self):
         soup = BeautifulSoup('<a href="/kontakt">Contact</a><a href="https://other.no/about">About</a><a href="/products">Products</a>', "html.parser")
-        self.assertEqual(_priority_links("https://example.no/", soup), ["https://example.no/kontakt"])
+        # Slice 2: PRIORITY_TERMS extended with career/services terms —
+        # /products is now intentionally discovered (off-domain still excluded).
+        self.assertEqual(_priority_links("https://example.no/", soup), ["https://example.no/kontakt", "https://example.no/products"])
 
     def test_js_shell_is_only_a_fallback_candidate(self):
         shell = BeautifulSoup('<html><script src="a.js"></script><script src="b.js"></script></html>', "html.parser")

@@ -24,8 +24,14 @@ def extract_jobs_from_career_pages(
     legal_name: str,
     registry_domain: str,
     career_urls: list[str],
+    site_content_verified: bool = True,
 ) -> dict[str, Any]:
-    """Fetch career pages, extract JobPosting JSON-LD. Returns gated job claims."""
+    """Fetch career pages, extract JobPosting JSON-LD. Returns gated job claims.
+
+    C2 fix: when the site failed content verification (franchisor/provider/
+    acquirer trap), career pages are skipped entirely — a franchisor's jobs
+    must never publish under the franchisee's envelope.
+    """
     import urllib.request  # noqa: E402
 
     import extruct  # noqa: E402
@@ -40,6 +46,10 @@ def extract_jobs_from_career_pages(
     jobs: list[dict[str, Any]] = []
     requests = 0
     seen: set[str] = set()
+
+    if not site_content_verified:
+        return {"jobs": [], "requests": 0, "skipped": "site_content_not_verified",
+                "elapsed_ms": int((time.monotonic() - started) * 1000)}
 
     for url in career_urls[:MAX_PAGES]:
         gate = assess_candidate(org_number, legal_name, registry_domain, url)

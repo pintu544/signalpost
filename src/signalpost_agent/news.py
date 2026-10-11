@@ -27,9 +27,15 @@ MAX_ITEMS_PER_COMPANY = 10
 
 
 def _fetch(url: str, timeout: int = TIMEOUT) -> bytes | None:
+    # W8: route through the starter's SSRF-safe opener (redirect re-validation)
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from norway_company_agent.website import SAFE_OPENER, USER_AGENT as _UA  # noqa: E402
+
+        req = urllib.request.Request(url, headers={"User-Agent": _UA})
+        with SAFE_OPENER.open(req, timeout=timeout) as resp:
             return resp.read(2_000_000)
     except Exception:
         return None
@@ -65,7 +71,7 @@ def _google_news_rss(query: str) -> list[dict[str, Any]]:
 def _gdelt(query: str) -> list[dict[str, Any]]:
     url = ("https://api.gdeltproject.org/api/v2/doc/doc?query="
            + urllib.parse.quote(query) + "&mode=artlist&maxrecords=10&format=json")
-    raw = _fetch(url, timeout=8)
+    raw = _fetch(url, timeout=5)  # W7: short timeout, runs in parallel anyway
     if not raw:
         return []
     items: list[dict[str, Any]] = []
@@ -80,67 +86,85 @@ def _gdelt(query: str) -> list[dict[str, Any]]:
     return items
 
 
-LEGAL_FORM_SUFFIXES = (
-    " ASA", " AS", " ENK", " DA", " ANS", " BA", " SA", " KF", " SF", " IKS",
-    " ASAvd", " NUF",
-)
+# NOTE: distinctive_name lives in entity_gate (single source of truth).
 
 
-def _distinctive_name(legal_name: str) -> str:
-    """Strip Norwegian legal-form suffixes: 'Equinor ASA' -> 'Equinor'."""
-    name = legal_name.strip()
-    upper = name.upper()
-    for suffix in LEGAL_FORM_SUFFIXES:
-        if upper.endswith(suffix):
-            name = name[: -len(suffix)].strip()
-            break
-    return name
+def _is_norwegian_outlet(item: dict[str, Any], registry_domain: str = "") -> bool:
+    """C1 fix: require an actual Norwegian registrable domain (.no) or the
+    company's own verified website domain — not a 'mentions Norway' heuristic,
+    which was circular because the query itself contained 'Norway'."""
+    try:
+        import tldextract
+
+        for u in (item.get("source_url") or "", item.get("url") or ""):
+            ext = tldextract.extract(u)
+            if ext.suffix == "no":
+                return True
+            if registry_domain and ext.top_domain_under_public_suffix == registry_domain.lower():
+                return True
+    except Exception:
+        pass
+    return False
 
 
-def _is_exact(org_number: str, legal_name: str, item: dict[str, Any]) -> tuple[bool, str]:
+def _is_exact(org_number: str, legal_name: str, item: dict[str, Any],
+              registry_domain: str = "") -> tuple[bool, str]:
+    """C1 fix: strict entity gate for news.
+
+    EXACT when the org number appears (digit-boundary-anchored), OR when the
+    distinctive name matches on word boundaries AND the outlet is Norwegian
+    (.no domain) AND no namesake collision (multiple org numbers in text).
+    Substring matching ('BAMA' in 'Obama') and the circular 'mentions Norway'
+    heuristic are gone.
+    """
+    from .entity_gate import distinctive_name, name_collision_risk, org_number_pattern
+
     hay = f"{item['title']} {item['snippet']}"
-    for variant in _org_number_variants(org_number):
-        if variant and variant in hay:
-            return True, f"organisation_number:{variant}"
-    # name in title + Norwegian signal (use distinctive name w/o legal suffix)
-    distinctive = _distinctive_name(legal_name)
-    name_hit = distinctive.casefold() in hay.casefold() if len(distinctive) > 3 else False
-    norwegian = (
-        ".no" in (item["source_url"] + item["url"]).lower()
-        or "norway" in hay.casefold() or "norge" in hay.casefold()
-        or "norsk" in hay.casefold()
-    )
-    if name_hit and norwegian:
-        return True, "legal_name_in_norwegian_outlet"
+    pattern = org_number_pattern(org_number)
+    if pattern and pattern.search(hay):
+        return True, f"organisation_number:{org_number}"
+    distinctive = distinctive_name(legal_name)
+    if len(distinctive) >= 6:
+        # word-boundary name match (no substring bleed)
+        if re.search(rf"(?<!\w){re.escape(distinctive)}(?!\w)", hay, re.IGNORECASE):
+            if _is_norwegian_outlet(item, registry_domain) and not name_collision_risk(legal_name, hay):
+                return True, "legal_name_in_norwegian_outlet"
     return False, ""
 
 
-def fetch_news(org_number: str, legal_name: str) -> dict[str, Any]:
-    """Return {'items': [...]} — entity-gated news items, newest first."""
+def fetch_news(org_number: str, legal_name: str, registry_domain: str = "") -> dict[str, Any]:
+    """Return {'items': [...]} — entity-gated news items, newest first.
+
+    W7: the 4 source fetches (2 queries x RSS+GDELT) run in parallel and GDELT
+    uses a short timeout — worst case ~12s per company, not 40s sequential.
+    """
+    from concurrent.futures import ThreadPoolExecutor  # noqa: E402
+
     started = time.monotonic()
     seen: set[str] = set()
     gated: list[dict[str, Any]] = []
     requests = 0
 
     queries = [f'"{org_number}"', f'"{legal_name}" Norway']
-    for query in queries:
-        for item in _google_news_rss(query):
-            requests += 1
-            if item["url"] in seen:
-                continue
-            seen.add(item["url"])
-            exact, proof = _is_exact(org_number, legal_name, item)
-            if exact:
-                item["entity_proof"] = proof
-                gated.append(item)
-        for item in _gdelt(query):
-            if item["url"] in seen:
-                continue
-            seen.add(item["url"])
-            exact, proof = _is_exact(org_number, legal_name, item)
-            if exact:
-                item["entity_proof"] = proof
-                gated.append(item)
+    jobs = []
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for query in queries:
+            jobs.append(("rss", pool.submit(_google_news_rss, query)))
+            jobs.append(("gdelt", pool.submit(_gdelt, query)))
+        for source, future in jobs:
+            try:
+                items = future.result()
+            except Exception:
+                items = []
+            requests += 1  # count every attempted source fetch (W7 secondary)
+            for item in items:
+                if item["url"] in seen:
+                    continue
+                seen.add(item["url"])
+                exact, proof = _is_exact(org_number, legal_name, item, registry_domain)
+                if exact:
+                    item["entity_proof"] = proof
+                    gated.append(item)
 
     return {"items": gated[:MAX_ITEMS_PER_COMPANY],
             "requests": requests,

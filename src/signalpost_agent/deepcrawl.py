@@ -22,21 +22,13 @@ from urllib.parse import urlparse
 from .entity_gate import assess_candidate
 
 EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
-# Norwegian phones: +47 XXX XX XXX, 8 digits, possibly spaced
-PHONE_RE = re.compile(r"(?:\+47[\s-]?)?(?:\d{2}[\s-]?){4}")
+# W2: digit-boundary lookarounds stop 8-digit slices of longer runs
+# (dates, org numbers). Norwegian phones are 8 digits, optionally +47.
+PHONE_RE = re.compile(r"(?<!\d)(?:\+47[\s-]?)?(?:\d{2}[\s-]?){4}(?!\d)")
+DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 CAREER_HINTS = ("karriere", "career", "ledige-stillinger", "ledige_stillinger", "jobb", "jobs")
 NEWS_HINTS = ("nyhet", "news", "press", "aktuelt", "media")
-
-
-def _page_kind(url: str, title: str) -> str:
-    hay = f"{url} {title}".casefold()
-    if any(h in hay for h in CAREER_HINTS):
-        return "career"
-    if any(h in hay for h in NEWS_HINTS):
-        return "news"
-    return "general"
-
 
 def _distinctive_name(legal_name: str) -> str:
     """Strip Norwegian legal-form suffixes for content matching."""
@@ -49,8 +41,11 @@ def _distinctive_name(legal_name: str) -> str:
 
 
 GENERIC_TOKENS = {
-    "BORETTSLAG", "SAMEIE", "EIENDOM", "HOLDING", "INVEST", "GRUPPEN",
-    "NORGE", "NORSK", "NORWAY", "AS", "ASA", "ENK", "DA", "ANS",
+    "BORETTSLAG", "BORETTSLAGET", "SAMEIE", "SAMEIET", "EIENDOM", "EIENDOMMEN",
+    "EIENDOMMER", "EIENDOMMENE", "HOLDING", "HOLDINGEN", "INVEST", "INVESTERING",
+    "GRUPPEN", "GRUPPA", "NORGE", "NORSK", "NORSKE", "NORWAY", "AS", "ASA",
+    "ENK", "DA", "ANS", "KONSULENT", "KONSULENTER", "TJENESTER", "TJENESTE",
+    "BYGG", "BYGGET", "UTVIKLING", "FORVALTNING", "DRIFT", "SERVICE",
 }
 
 
@@ -82,6 +77,9 @@ def site_content_verified(org_number: str, legal_name: str, pages: list[dict[str
     """
     combined = "\n".join(p.get("main_text_excerpt", "") + " " + p.get("title", "") for p in pages)
     return _content_verified(org_number, legal_name, combined)
+
+
+def _page_kind(url: str, title: str) -> str:
     hay = f"{url} {title}".casefold()
     if any(h in hay for h in CAREER_HINTS):
         return "career"
@@ -135,8 +133,14 @@ def extract_facts(
                     seen_emails.add(email)
                     facts.append({"field": "contact_email", "value": email,
                                   "evidence_url": url, "verdict": verdict})
-            for phone in PHONE_RE.findall(text):
+            for match in PHONE_RE.finditer(text):
+                phone = match.group(0)
+                # W2: reject dates (2026-10-11) and org-number overlap
+                if DATE_RE.search(text[max(0, match.start() - 5):match.end() + 5]):
+                    continue
                 digits = re.sub(r"\D", "", phone)
+                if digits == re.sub(r"\D", "", org_number):
+                    continue
                 # reject year ranges like 2002-2005 (false positive)
                 if re.fullmatch(r"(19|20)\d{2}[\s-]?(19|20)\d{2}", phone.strip()):
                     continue
@@ -163,4 +167,5 @@ def extract_facts(
         facts.append({"field": "about_text", "value": about_text[:3000],
                       "evidence_url": about_url, "verdict": about_verdict})
 
-    return {"facts": facts, "career_urls": career_urls, "news_urls": news_urls}
+    return {"facts": facts, "career_urls": career_urls, "news_urls": news_urls,
+            "site_content_verified": site_ok}

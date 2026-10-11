@@ -56,9 +56,9 @@ def assert_public_url(url: str) -> None:
         # Block the actually-dangerous categories (private nets, localhost,
         # link-local incl. cloud metadata, multicast). We deliberately do NOT
         # use `not ip.is_global`: this VM's egress proxy resolves public
-        # hostnames to 198.18.0.0/15 (RFC 2544 benchmarking range), which
+        # hostnames to 198.18.0.0/15 (RFC 6598 shared address space), which
         # Python flags as private/global=False, but HTTP goes through the
-        # proxy — never a direct connection. The benchmarking range itself is
+        # proxy — never a direct connection. The shared range itself is
         # never a real internal service, so it stays allowed.
         _BENCH = ipaddress.ip_network("198.18.0.0/15")
         if ((ip.is_private and ip not in _BENCH)

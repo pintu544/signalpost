@@ -77,8 +77,20 @@ def main() -> None:
             "latencies_ms": [item.elapsed_ms for item in metrics] + website_metrics["latencies_ms"],
         }
         # Slice 2 recall connectors (opt-in via --modules recall)
+        # W3: never let a recall-connector bug discard the company's valid
+        # official/website evidence — degrade to source_error instead.
         if "recall" in requested_modules and _RECALL_AVAILABLE:
-            recall_records, recall_metrics = enrich_recall(profile)
+            try:
+                recall_records, recall_metrics = enrich_recall(profile)
+            except Exception as exc:  # noqa: BLE001
+                recall_records = {
+                    "recall": {
+                        "status": "source_error",
+                        "note": f"recall enrichment crashed: {type(exc).__name__}: {exc}",
+                        "retrieved_at": utc_now(),
+                    }
+                }
+                recall_metrics = {"requests": 0, "bytes": 0, "latencies_ms": []}
             profile["evidence"].update(recall_records)
             metric["requests"] += recall_metrics["requests"]
             metric["latencies_ms"] += recall_metrics["latencies_ms"]

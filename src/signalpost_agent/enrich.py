@@ -53,7 +53,7 @@ def enrich_recall(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, in
             note="No publishable facts; ambiguous candidates withheld")
 
     # T2.2 — news signals
-    news = fetch_news(org, legal_name)
+    news = fetch_news(org, legal_name, registry_domain)
     requests += news["requests"]
     if news["items"]:
         records["news"] = _evidence_record(
@@ -67,7 +67,10 @@ def enrich_recall(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, in
             "https://news.google.com/rss/search", note="No entity-gated news found")
 
     # T2.3 — jobs signals (career pages found by T2.1)
-    jobs = extract_jobs_from_career_pages(org, legal_name, registry_domain, deep["career_urls"])
+    # C2: site_content_verified gates the jobs path too (franchisor trap)
+    jobs = extract_jobs_from_career_pages(org, legal_name, registry_domain,
+                                          deep["career_urls"],
+                                          site_content_verified=deep["site_content_verified"])
     requests += jobs["requests"]
     if jobs["jobs"]:
         records["jobs"] = _evidence_record(

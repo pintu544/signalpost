@@ -22,15 +22,28 @@ def _org_number_variants(org_number: str) -> set[str]:
 
 
 def _registered_domain(url: str) -> str:
+    """Registrable domain via tldextract (matches the starter's website.py).
+
+    W1 fix: the old version returned the full host minus www, so legitimate
+    subdomain pages (karriere.company.no) failed the domain gate.
+    """
     try:
         from urllib.parse import urlparse
 
-        host = urlparse(url).netloc.lower()
-        if host.startswith("www."):
-            host = host[4:]
-        return host
+        import tldextract
+
+        return tldextract.extract(urlparse(url).hostname or "").top_domain_under_public_suffix
     except Exception:
         return ""
+
+
+def _domain_matches(candidate_url: str, registry_domain: str) -> bool:
+    """True when the candidate is on the registry domain or a subdomain."""
+    if not registry_domain:
+        return False
+    cand = _registered_domain(candidate_url).lower()
+    reg = registry_domain.lower()
+    return bool(cand) and (cand == reg or cand.endswith("." + reg))
 
 
 def assess_candidate(
@@ -51,12 +64,12 @@ def assess_candidate(
     haystack = f"{text}\n{jsonld_text}"
     proof: list[str] = []
 
-    for variant in _org_number_variants(org_number):
-        if variant and variant in haystack:
-            proof.append(f"organisation_number:{variant}")
-            break
+    # W4: digit-boundary-anchored org matching (no substring bleed)
+    pattern = org_number_pattern(org_number)
+    if pattern and pattern.search(haystack):
+        proof.append(f"organisation_number:{org_number}")
 
-    if _registered_domain(candidate_url) and _registered_domain(candidate_url) == registry_domain.lower():
+    if _domain_matches(candidate_url, registry_domain):
         proof.append(f"registry_domain:{registry_domain}")
 
     if proof:
@@ -70,3 +83,31 @@ def name_collision_risk(legal_name: str, text: str) -> bool:
     namesake collisions even when the name matches."""
     other_orgs = set(re.findall(r"\b\d{3}[\s-]?\d{3}[\s-]?\d{3}\b", text))
     return len(other_orgs) > 1
+
+
+LEGAL_FORM_SUFFIXES = (
+    " ASA", " AS", " ENK", " DA", " ANS", " BA", " SA", " KF", " SF", " IKS",
+    " NUF",
+)
+
+
+def distinctive_name(legal_name: str) -> str:
+    """Strip Norwegian legal-form suffixes: 'Equinor ASA' -> 'Equinor'."""
+    name = legal_name.strip()
+    upper = name.upper()
+    for suffix in LEGAL_FORM_SUFFIXES:
+        if upper.endswith(suffix):
+            return name[: -len(suffix)].strip()
+    return name
+
+
+def org_number_pattern(org_number: str) -> "re.Pattern[str] | None":
+    """Digit-boundary-anchored regex for the org number variants.
+
+    Prevents '123-456-789' matching inside '123-456-7890' (W4).
+    """
+    variants = _org_number_variants(org_number)
+    if not variants:
+        return None
+    alternation = "|".join(re.escape(v) for v in sorted(variants, key=len, reverse=True))
+    return re.compile(rf"(?<!\d)(?:{alternation})(?!\d)")
