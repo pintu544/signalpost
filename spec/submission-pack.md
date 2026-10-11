@@ -17,7 +17,7 @@
 >
 > **Repository URL:** https://github.com/pintu544/signalpost
 >
-> **Exact commit hash:** `COMMIT_HASH` (fill at send time — see below)
+> **Exact commit hash:** `3039437726ec99dd51f3e8ba15fe12eff4da824f`
 >
 > **100-company smoke-test report:** attached (`report.json`) — 100/100 terminal
 > envelopes, validation passed (exact count, unique org numbers, all terminal
