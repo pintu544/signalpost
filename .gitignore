@@ -1,0 +1,22 @@
+# Large data files (downloaded, not committed)
+brreg-enheter.csv.gz
+signalpost-universe.jsonl.gz
+*.csv.gz
+*.jsonl.gz
+
+# Run outputs
+out/
+smoke-*/
+entry-*/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+uv.lock
+!.venv/
+
+# OS
+.DS_Store
+._*
