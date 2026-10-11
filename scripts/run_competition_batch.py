@@ -16,6 +16,14 @@ from norway_company_agent.identity import apply_website_identity_gate  # noqa: E
 from norway_company_agent.official import fetch_official_modules  # noqa: E402
 from norway_company_agent.website import fetch_website  # noqa: E402
 
+# Slice 2: recall connectors (website deep crawl + news + jobs), keyless + entity-gated.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+try:
+    from signalpost_agent.enrich import enrich_recall  # noqa: E402
+    _RECALL_AVAILABLE = True
+except ImportError:
+    _RECALL_AVAILABLE = False
+
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -53,7 +61,7 @@ def main() -> None:
             if key in annotations[profile["organisation_number"]]:
                 profile[key] = annotations[profile["organisation_number"]][key]
     requested_modules = [item.strip() for item in args.modules.split(",") if item.strip()]
-    fetch_modules = set(requested_modules) - {"registry", "accounting_obligation", "website"}
+    fetch_modules = set(requested_modules) - {"registry", "accounting_obligation", "website", "recall"}
     operations = {"requests": 0, "bytes": 0, "latencies_ms": []}
 
     def enrich(profile: dict) -> tuple[dict, dict]:
@@ -68,6 +76,12 @@ def main() -> None:
             "bytes": sum(item.bytes_received for item in metrics) + website_metrics["bytes"],
             "latencies_ms": [item.elapsed_ms for item in metrics] + website_metrics["latencies_ms"],
         }
+        # Slice 2 recall connectors (opt-in via --modules recall)
+        if "recall" in requested_modules and _RECALL_AVAILABLE:
+            recall_records, recall_metrics = enrich_recall(profile)
+            profile["evidence"].update(recall_records)
+            metric["requests"] += recall_metrics["requests"]
+            metric["latencies_ms"] += recall_metrics["latencies_ms"]
         profile["run_metrics"] = metric
         return profile, metric
 

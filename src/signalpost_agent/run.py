@@ -61,6 +61,8 @@ def main() -> None:
     parser.add_argument("--bulk", default=str(BULK_SNAPSHOT), help="Brønnøysund bulk snapshot (.gz)")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--recall", action="store_true",
+                        help="Enable Slice 2 recall connectors (website deep crawl + news + jobs)")
     args = parser.parse_args()
 
     batch = Path(args.batch)
@@ -72,6 +74,9 @@ def main() -> None:
 
     expected = len(read_organisation_inputs(batch))
 
+    modules = "registry,accounting_obligation,registry_live,financials,roles,group,locations,website"
+    if args.recall:
+        modules += ",recall"
     sys.argv = [
         "run_competition_batch.py",
         "--organisations", str(batch),
@@ -82,6 +87,7 @@ def main() -> None:
         "--run-id", args.run_id,
         "--expected-count", str(expected),
         "--workers", str(args.workers),
+        "--modules", modules,
     ] + (["--resume"] if args.resume else [])
     runpy.run_path(str(ROOT / "scripts" / "run_competition_batch.py"), run_name="__main__")
 

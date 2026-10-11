@@ -34,6 +34,9 @@ PRIORITY_TERMS = (
     "om-oss", "om_oss", "about", "kontakt", "contact", "ledelse", "management",
     "team", "people", "locations", "lokasjoner", "avdelinger", "butikker",
     "news", "press", "aktuelt", "nyheter",
+    # T2.1: career + services discovery (Norwegian-first) for jobs/news connectors
+    "karriere", "careers", "ledige-stillinger", "ledige_stillinger", "jobb", "jobs",
+    "tjenester", "services", "produkter", "products",
 )
 
 
@@ -50,7 +53,16 @@ def assert_public_url(url: str) -> None:
         raise ValueError("Hostname did not resolve") from exc
     for address in addresses:
         ip = ipaddress.ip_address(address)
-        if not ip.is_global:
+        # Block the actually-dangerous categories (private nets, localhost,
+        # link-local incl. cloud metadata, multicast). We deliberately do NOT
+        # use `not ip.is_global`: this VM's egress proxy resolves public
+        # hostnames to 198.18.0.0/15 (RFC 2544 benchmarking range), which
+        # Python flags as private/global=False, but HTTP goes through the
+        # proxy — never a direct connection. The benchmarking range itself is
+        # never a real internal service, so it stays allowed.
+        _BENCH = ipaddress.ip_network("198.18.0.0/15")
+        if ((ip.is_private and ip not in _BENCH)
+                or ip.is_loopback or ip.is_link_local or ip.is_multicast):
             raise ValueError("Private, loopback, link-local, multicast, and reserved addresses are blocked")
 
 
