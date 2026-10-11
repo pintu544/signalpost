@@ -85,8 +85,15 @@ def profiles_from_bulk(path: str | Path, organisation_numbers: Iterable[str]) ->
         if len(found) == len(wanted):
             break
     missing = [org for org in requested if org not in found]
-    if missing:
-        raise ValueError(f"Organisation numbers absent from registry snapshot: {missing[:10]}")
+    for org in missing:
+        # C2 fix: never abort the batch — a skeleton profile flows through the
+        # normal enrichment path, where live-API 404s become not_found records
+        # and the envelope writer emits a terminal envelope for the org.
+        found[org] = {
+            "organisation_number": org,
+            "evidence": {},
+            "_absent_from_snapshot": True,
+        }
     return [found[org] for org in requested], {
         "registry_snapshot_sha256": snapshot_sha256,
         "registry_rows_scanned": scanned,
@@ -113,6 +120,22 @@ def evidence_terminal_state(record: dict[str, Any] | None) -> str:
     return "submission_error"
 
 
+# W1 fix: the challenge's output contract uses six availability states
+# (available | not_available | blocked | not_applicable | ambiguous | failed).
+# Internal terminal states map onto them at envelope emission so precision
+# gates (e.g. "publish as ambiguous, never guess") are expressible.
+CONTRACT_STATE_MAP = {
+    "complete": "available",
+    "not_applicable": "not_applicable",
+    "not_found": "not_available",
+    "blocked_policy": "blocked",
+    "blocked_robots": "blocked",
+    "source_error": "failed",
+    "budget_exhausted": "failed",
+    "submission_error": "failed",
+}
+
+
 def terminal_envelope(
     profile: dict[str, Any],
     *,
@@ -130,10 +153,13 @@ def terminal_envelope(
             "final_timestamp": (record or {}).get("retrieved_at") or completed_at,
         }
     entity_state = "submission_error" if any(item["state"] == "submission_error" for item in module_states.values()) else "complete"
+    # W1: six-state contract availability per module, alongside internal states.
+    contract_states = {module: CONTRACT_STATE_MAP[state["state"]] for module, state in module_states.items()}
     return {
         "run_id": run_id,
         "organisation_number": profile["organisation_number"],
         "state": entity_state,
+        "contract_states": contract_states,
         "started_at": started_at,
         "completed_at": completed_at,
         "modules": module_states,

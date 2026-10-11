@@ -14,8 +14,6 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
-uv.lock
-!.venv/
 
 # OS
 .DS_Store

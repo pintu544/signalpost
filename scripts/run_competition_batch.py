@@ -88,7 +88,25 @@ def main() -> None:
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {pool.submit(enrich, profile): profile["organisation_number"] for profile in pending_profiles}
         for index, future in enumerate(as_completed(futures), 1):
-            profile, metric = future.result()
+            # W2 fix: one poison company must never abort the batch — it gets a
+            # terminal failed envelope instead (challenge: "I found nothing" is
+            # valid; a missing row is not).
+            org = futures[future]
+            try:
+                profile, metric = future.result()
+            except Exception as exc:  # noqa: BLE001 — any per-company failure → failed envelope
+                profile = {
+                    "organisation_number": org,
+                    "evidence": {
+                        module: {
+                            "status": "source_error",
+                            "note": f"enrichment crashed: {type(exc).__name__}: {exc}",
+                            "retrieved_at": utc_now(),
+                        }
+                        for module in requested_modules
+                    },
+                }
+                metric = {"requests": 0, "bytes": 0, "latencies_ms": []}
             state[profile["organisation_number"]] = profile
             operations["requests"] += metric["requests"]
             operations["bytes"] += metric["bytes"]
@@ -120,6 +138,7 @@ def main() -> None:
         "modules": requested_modules,
         "registry": registry_metadata,
         "operations": operations,
+        "third_party_cost_usd": 0.0,
         "validation": validation,
     }
     Path(args.report).parent.mkdir(parents=True, exist_ok=True)

@@ -14,7 +14,7 @@ uv sync
 curl -L 'https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv' -o brreg-enheter.csv.gz
 
 # 3. Run on a batch of organisation numbers (JSONL, one {"organisation_number": "..."} per line)
-uv run python -m signalpost_agent.run --batch companies.jsonl --out out/ --run-id v1
+PYTHONPATH=src uv run python -m signalpost_agent.run --batch companies.jsonl --out out/ --run-id v1
 ```
 
 Output in `out/`:
@@ -27,7 +27,7 @@ Output in `out/`:
 ```bash
 curl -L 'https://builderr.ai/signalpost-company-universe-2025.jsonl.gz' -o signalpost-universe.jsonl.gz
 uv run python select_entry_batch.py --universe signalpost-universe.jsonl.gz --count 100 --output smoke.jsonl
-uv run python -m signalpost_agent.run --batch smoke.jsonl --out out/smoke --run-id smoke-001
+PYTHONPATH=src uv run python -m signalpost_agent.run --batch smoke.jsonl --out out/smoke --run-id smoke-001
 ```
 
 ## Tests

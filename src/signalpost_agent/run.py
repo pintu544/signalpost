@@ -20,7 +20,37 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "src"))
 BULK_SNAPSHOT = ROOT / "brreg-enheter.csv.gz"
+BULK_SNAPSHOT_URL = "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv"
+
+
+def ensure_bulk_snapshot(path: Path) -> Path:
+    """C1 fix: the 155 MB snapshot is gitignored, so a clean machine won't have
+    it. Download it from the official Brønnøysund URL on first run instead of
+    dying with FileNotFoundError (which would zero the official run)."""
+    if path.exists() and path.stat().st_size > 0:
+        return path
+    print(f"Bulk snapshot not found at {path} — downloading from Brønnøysund ...", flush=True)
+    import gzip
+    import urllib.request
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".download")
+    try:
+        with urllib.request.urlopen(BULK_SNAPSHOT_URL, timeout=60) as resp, open(tmp, "wb") as out:
+            while chunk := resp.read(1 << 20):
+                out.write(chunk)
+        # sanity: must be valid gzip with content
+        with gzip.open(tmp, "rt", encoding="utf-8-sig") as handle:
+            if not handle.read(1024).strip():
+                raise ValueError("downloaded snapshot is empty")
+        tmp.replace(path)
+    finally:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+    print(f"Snapshot ready: {path} ({path.stat().st_size // 1_000_000} MB)", flush=True)
+    return path
 
 
 def main() -> None:
@@ -35,12 +65,17 @@ def main() -> None:
 
     batch = Path(args.batch)
     out = Path(args.out)
-    expected = sum(1 for line in batch.read_text(encoding="utf-8").splitlines() if line.strip())
+    bulk = ensure_bulk_snapshot(Path(args.bulk))
+    # W3 fix: count via the real input reader (supports .json arrays/dicts),
+    # not line counting.
+    from norway_company_agent.batch import read_organisation_inputs  # noqa: E402
+
+    expected = len(read_organisation_inputs(batch))
 
     sys.argv = [
         "run_competition_batch.py",
         "--organisations", str(batch),
-        "--bulk", args.bulk,
+        "--bulk", str(bulk),
         "--profiles-output", str(out / "profiles.jsonl"),
         "--output", str(out / "envelopes.jsonl"),
         "--report", str(out / "report.json"),
