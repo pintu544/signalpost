@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""T3.3 — Static responsive profile viewer.
+
+Reads out/envelopes.jsonl, synthesizes each profile, and writes a single
+self-contained viewer/index.html (no external dependencies, works offline):
+company list with search + per-company evidence-cited profile view.
+"""
+from __future__ import annotations
+
+import argparse
+import html
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from signalpost_agent.synthesize import synthesize  # noqa: E402
+
+PAGE_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Signalpost — Company Profiles</title>
+<style>
+:root{--bg:#0f172a;--card:#1e293b;--text:#e2e8f0;--muted:#94a3b8;--accent:#38bdf8;--ok:#34d399;--warn:#fbbf24;--bad:#f87171}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,sans-serif;line-height:1.5}
+header{padding:1.2rem;max-width:1100px;margin:0 auto}
+header h1{font-size:1.4rem} header p{color:var(--muted);font-size:.9rem}
+#search{width:100%;padding:.7rem 1rem;border-radius:.6rem;border:1px solid #334155;background:var(--card);color:var(--text);font-size:1rem;margin:.8rem 0}
+main{max-width:1100px;margin:0 auto;padding:0 1.2rem 3rem;display:grid;gap:1rem}
+@media(min-width:800px){main.list{grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}}
+.card{background:var(--card);border-radius:.8rem;padding:1.1rem;cursor:pointer;border:1px solid transparent}
+.card:hover{border-color:var(--accent)}
+.card h3{font-size:1.05rem;margin-bottom:.3rem}.card .meta{color:var(--muted);font-size:.85rem}
+.badge{display:inline-block;font-size:.72rem;padding:.15rem .5rem;border-radius:1rem;margin-right:.35rem;margin-top:.4rem}
+.b-ok{background:#064e3b;color:var(--ok)}.b-warn{background:#78350f;color:var(--warn)}.b-bad{background:#7f1d1d;color:var(--bad)}.b-info{background:#0c4a6e;color:var(--accent)}
+#detail{display:none}
+#detail .back{color:var(--accent);cursor:pointer;margin-bottom:1rem;display:inline-block}
+.sec{background:var(--card);border-radius:.8rem;padding:1.1rem;margin-bottom:1rem}
+.sec h2{font-size:1.05rem;margin-bottom:.6rem;color:var(--accent)}
+.sec p{margin-bottom:.55rem;font-size:.95rem}
+.ev{font-size:.75rem;color:var(--muted);margin-top:.15rem}
+.ev a{color:var(--muted)}
+footer{text-align:center;color:var(--muted);font-size:.8rem;padding:2rem}
+</style>
+</head>
+<body>
+<header>
+<h1>Signalpost — Company Profiles</h1>
+<p id="runinfo"></p>
+<input id="search" type="search" placeholder="Search companies…" autocomplete="off">
+</header>
+<main id="list" class="list"></main>
+<main id="detail"></main>
+<footer>signalpost-agent · every claim cites its evidence · $0 third-party cost</footer>
+<script>
+const DATA = __DATA__;
+const runinfo = document.getElementById('runinfo');
+runinfo.textContent = DATA.run_id + ' · ' + DATA.profiles.length + ' companies · generated ' + DATA.generated_at.slice(0,10);
+const list = document.getElementById('list'), detail = document.getElementById('detail'), search = document.getElementById('search');
+function badges(p){
+  const s = p.sections.map(x=>x.title);
+  let h = '';
+  if(s.includes('News') && !p.sections.find(x=>x.title==='News').sentences[0].text.startsWith('No')) h += '<span class="badge b-info">news</span>';
+  if(s.includes('Jobs') && !p.sections.find(x=>x.title==='Jobs').sentences[0].text.startsWith('No')) h += '<span class="badge b-ok">hiring</span>';
+  const st = p.sections.find(x=>x.title==='Status').sentences[0].text;
+  if(st.startsWith('Registered as bankrupt')) h += '<span class="badge b-bad">bankrupt</span>';
+  else if(st.startsWith('Registered as under')) h += '<span class="badge b-warn">liquidating</span>';
+  return h;
+}
+function renderList(filter){
+  list.style.display='grid'; detail.style.display='none'; detail.innerHTML='';
+  const q = (filter||'').toLowerCase();
+  list.innerHTML = DATA.profiles
+    .filter(p => !q || p.name.toLowerCase().includes(q) || p.organisation_number.includes(q))
+    .map((p,i) => `<div class="card" data-i="${DATA.profiles.indexOf(p)}"><h3>${esc(p.name)}</h3><div class="meta">${esc(p.headline)}<br>${esc(p.organisation_number)}</div><div>${badges(p)}</div></div>`).join('')
+    || '<p style="color:var(--muted)">No matches.</p>';
+  list.querySelectorAll('.card').forEach(c => c.onclick = () => showDetail(+c.dataset.i));
+}
+function esc(s){return String(s??'').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
+function showDetail(i){
+  const p = DATA.profiles[i];
+  list.style.display='none'; detail.style.display='block';
+  detail.innerHTML = `<span class="back" onclick="back()">← all companies</span><h2 style="margin-bottom:1rem">${esc(p.name)} <span style="color:var(--muted);font-weight:normal">${esc(p.organisation_number)}</span></h2>` +
+    p.sections.map(s => `<div class="sec"><h2>${esc(s.title)}</h2>` + s.sentences.map(x =>
+      `<p>${esc(x.text)}<div class="ev">source: ${esc(x.evidence[0]?.source||'n/a')} · retrieved ${esc((x.evidence[0]?.retrieved_at||'').slice(0,10))}${x.evidence[0]?.url?` · <a href="${esc(x.evidence[0].url)}" target="_blank" rel="noopener">source link</a>`:''}</div></p>`).join('') + `</div>`).join('');
+  window.scrollTo(0,0);
+}
+function back(){ renderList(search.value); }
+search.oninput = () => renderList(search.value);
+renderList('');
+</script>
+</body>
+</html>
+"""
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Build static profile viewer")
+    parser.add_argument("--envelopes", required=True)
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--run-id", default="local")
+    args = parser.parse_args()
+
+    profiles = []
+    for line in Path(args.envelopes).read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            profiles.append(synthesize(json.loads(line)))
+    profiles.sort(key=lambda p: p["name"])
+
+    import datetime
+    payload = {
+        "run_id": args.run_id,
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "profiles": profiles,
+    }
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    page = PAGE_TEMPLATE.replace("__DATA__", json.dumps(payload, ensure_ascii=False))
+    (out / "index.html").write_text(page, encoding="utf-8")
+    print(f"viewer: {len(profiles)} profiles -> {out / 'index.html'}")
+
+
+if __name__ == "__main__":
+    main()

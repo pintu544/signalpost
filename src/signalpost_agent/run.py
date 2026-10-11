@@ -89,7 +89,38 @@ def main() -> None:
         "--workers", str(args.workers),
         "--modules", modules,
     ] + (["--resume"] if args.resume else [])
-    runpy.run_path(str(ROOT / "scripts" / "run_competition_batch.py"), run_name="__main__")
+    try:
+        runpy.run_path(str(ROOT / "scripts" / "run_competition_batch.py"), run_name="__main__")
+    except SystemExit as exc:
+        if exc.code not in (0, None):
+            raise
+    # Slice 3: snapshot store (idempotent refresh) + static viewer
+    _post_process(out, args.run_id)
+
+
+def _post_process(out: Path, run_id: str) -> None:
+    """Slice 3 post-processing: record snapshot hashes, build static viewer."""
+    import datetime
+    import json
+
+    from signalpost_agent.snapshots import SnapshotStore
+
+    envelopes_path = out / "envelopes.jsonl"
+    envelopes = [json.loads(line) for line in envelopes_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    recorded_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    store = SnapshotStore(out / "snapshots.db")
+    change_report = store.record_run(run_id, envelopes, recorded_at)
+    store.close()
+    (out / "changes.json").write_text(json.dumps(change_report, ensure_ascii=False, indent=2), encoding="utf-8")
+    n_changes = change_report["changed_modules"]
+    print(f"snapshots: {len(envelopes)} envelopes, {n_changes} changed modules vs previous run", flush=True)
+
+    import runpy as _runpy
+    sys.argv = ["build_viewer.py", "--envelopes", str(out / "envelopes.jsonl"),
+                "--out", str(out / "viewer"), "--run-id", run_id]
+    _runpy.run_path(str(ROOT / "scripts" / "build_viewer.py"), run_name="__main__")
+
 
 
 if __name__ == "__main__":
