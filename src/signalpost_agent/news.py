@@ -10,6 +10,7 @@ from a Norwegian outlet or mentions Norway. Name-only foreign hits abstain.
 """
 from __future__ import annotations
 
+import datetime
 import html
 import json
 import re
@@ -39,6 +40,86 @@ def _fetch(url: str, timeout: int = TIMEOUT) -> bytes | None:
             return resp.read(2_000_000)
     except Exception:
         return None
+
+
+def _resolve_url(url: str, timeout: int = 10) -> tuple[str, bool]:
+    """Resolve a Google News redirect URL to the direct publisher URL.
+
+    Returns (direct_url, True) on success, (original_url, False) on failure
+    or if the URL is not a Google News redirect. Never raises; never drops
+    the item — a failed resolution falls back to the original URL.
+    """
+    url = url or ""  # C1 fix: coerce None (e.g. GDELT null url) to ""
+    if "news.google.com/rss/articles" not in url:
+        return url, False
+    try:
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from norway_company_agent.website import SAFE_OPENER  # noqa: E402
+
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        # urllib follows redirects automatically; geturl() returns the final URL
+        # without needing to read the body.
+        with SAFE_OPENER.open(req, timeout=timeout) as resp:
+            final_url = resp.geturl()
+            if final_url != url and "news.google.com" not in final_url:
+                return final_url, True
+            return url, False
+    except Exception:
+        return url, False
+
+
+def _normalize_date(raw: str) -> str:
+    """Normalize a publication date to ISO 8601 (YYYY-MM-DDTHH:MM:SSZ).
+
+    Handles RFC 2822 (Google News RSS pubDate) and GDELT compact
+    ("20261013T070000Z"). Timezone-aware inputs are converted to UTC;
+    naive inputs are assumed UTC. Returns the original string if unparseable —
+    never blank.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return raw
+    # RFC 2822: "Mon, 13 Oct 2026 07:00:00 GMT" or "... +0200"
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(raw)
+        if dt is not None:
+            # H1 fix: convert aware datetimes to UTC before labeling "Z".
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(datetime.timezone.utc)
+            return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        pass
+    # GDELT compact: "20261013T070000Z" (already UTC)
+    try:
+        dt = datetime.datetime.strptime(raw, "%Y%m%dT%H%M%SZ")
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        pass
+    # Already ISO? Validate and normalize to UTC.
+    try:
+        dt = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(datetime.timezone.utc)
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        pass
+    return raw
+
+
+def _clean_title(title: str) -> str:
+    """Strip the publisher suffix Google News appends ("Headline - VG").
+
+    Removes only the LAST " - X" segment. If stripping would leave an empty
+    title, returns the original. Conservative by design.
+    """
+    title = (title or "").strip()
+    if not title:
+        return title
+    cleaned = re.sub(r"\s+-\s+[^-]+$", "", title).strip()
+    return cleaned if cleaned else title
 
 
 def _google_news_rss(query: str) -> list[dict[str, Any]]:
@@ -147,6 +228,7 @@ def fetch_news(org_number: str, legal_name: str, registry_domain: str = "") -> d
 
     queries = [f'"{org_number}"', f'"{legal_name}" Norway']
     jobs = []
+    candidates: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=4) as pool:
         for query in queries:
             jobs.append(("rss", pool.submit(_google_news_rss, query)))
@@ -158,13 +240,38 @@ def fetch_news(org_number: str, legal_name: str, registry_domain: str = "") -> d
                 items = []
             requests += 1  # count every attempted source fetch (W7 secondary)
             for item in items:
-                if item["url"] in seen:
+                url = item.get("url") or ""
+                if not url or url in seen:
                     continue
-                seen.add(item["url"])
+                seen.add(url)
                 exact, proof = _is_exact(org_number, legal_name, item, registry_domain)
                 if exact:
                     item["entity_proof"] = proof
-                    gated.append(item)
+                    item["organisation_number"] = org_number
+                    # v2: normalize for verified-pool matching (after gating,
+                    # so the entity check sees the original title).
+                    item["published_original"] = item.get("published", "")
+                    item["published"] = _normalize_date(item.get("published", ""))
+                    item["title"] = _clean_title(item.get("title", ""))
+                    candidates.append(item)
+
+    # H2 fix: resolve URLs in parallel (was serial; 10s timeout × N items
+    # would block). Only Google News redirects need resolution.
+    def _resolve_item(item: dict[str, Any]) -> dict[str, Any]:
+        direct_url, resolved = _resolve_url(item["url"])
+        item["url"] = direct_url
+        item["url_resolved"] = resolved
+        return item
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        resolved_items = list(pool.map(_resolve_item, candidates))
+
+    for item in resolved_items:
+        # Dedupe post-resolution: two redirects may point to the same article.
+        if item["url_resolved"] and item["url"] in seen:
+            continue
+        seen.add(item["url"])
+        gated.append(item)
 
     return {"items": gated[:MAX_ITEMS_PER_COMPANY],
             "requests": requests,
