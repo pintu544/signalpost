@@ -52,6 +52,29 @@ def _fmt_money(value: Any) -> str:
         return "n/a"
 
 
+def _financial_year(record: dict[str, Any]) -> str:
+    """Accounting year for a normalized financial record.
+
+    normalize_financials emits the raw ``regnskapsperiode`` as ``period``;
+    prefer its tilDato, fall back to fraDato, then to legacy top-level keys.
+    Returns "" when no year can be established (callers render "n/a").
+    """
+    if isinstance(record, dict):
+        period = record.get("period")
+        if isinstance(period, dict):
+            for key in ("tilDato", "fraDato"):
+                value = period.get(key)
+                if isinstance(value, str) and len(value) >= 4 and value[:4].isdigit():
+                    return value[:4]
+        for key in ("year", "accounting_year"):
+            value = record.get(key)
+            if isinstance(value, (str, int)):
+                text = str(value)
+                if len(text) >= 4 and text[:4].isdigit():
+                    return text[:4]
+    return ""
+
+
 def synthesize(envelope: dict[str, Any]) -> dict[str, Any]:
     """Build a deterministic, evidence-cited profile from an envelope.
 
@@ -107,9 +130,15 @@ def synthesize(envelope: dict[str, Any]) -> dict[str, Any]:
     records = _val_list(fin_rec, "records")
     if fin_rec.get("status") == "available" and records:
         latest = records[0] if isinstance(records[0], dict) else {}
-        year = _str(latest.get("year")) or _str(latest.get("accounting_year")) or "latest"
-        rev = latest.get("revenue", latest.get("operating_revenue"))
-        res = latest.get("result", latest.get("profit_loss"))
+        year = _financial_year(latest) or "n/a"
+        rev = latest.get("revenue")
+        if rev is None:
+            rev = latest.get("operating_revenue")
+        res = latest.get("annual_result")
+        if res is None:
+            res = latest.get("result")
+        if res is None:
+            res = latest.get("profit_loss")
         sents = [(f"Latest submitted accounts ({year}): revenue {_fmt_money(rev)}, result {_fmt_money(res)}.",
                   [_ref(fin_rec)])]
         if len(records) > 1:

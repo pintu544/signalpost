@@ -71,12 +71,33 @@ def _get(value: Any, *path: str) -> Any:
     return value
 
 
+def _record_year(item: Any) -> str | None:
+    """Accounting year for a raw Brønnøysund account record.
+
+    Reads ``regnskapsperiode`` (tilDato preferred, fraDato fallback).
+    Returns None when no parseable year is present.
+    """
+    period = item.get("regnskapsperiode") if isinstance(item, dict) else None
+    if isinstance(period, dict):
+        for key in ("tilDato", "fraDato"):
+            value = period.get(key)
+            if isinstance(value, str) and len(value) >= 4 and value[:4].isdigit():
+                return value[:4]
+    return None
+
+
 def normalize_financials(body: Any) -> dict[str, Any]:
     records = body if isinstance(body, list) else []
     if not records:
         return {"records": []}
+    # Brønnøysund returns accounts oldest-first, but every consumer treats
+    # records[0] as the latest submitted accounts — sort newest-first so the
+    # "latest" label is truthful. Records without a parseable year go last,
+    # keeping their original relative order (stable sort).
+    dated = [(_record_year(item), item) for item in records]
+    dated.sort(key=lambda pair: (pair[0] is not None, pair[0] or ""), reverse=True)
     normalized = []
-    for item in records[:3]:
+    for _, item in dated[:3]:
         normalized.append({
             "record_id": item.get("id"),
             "account_type": item.get("regnskapstype"),

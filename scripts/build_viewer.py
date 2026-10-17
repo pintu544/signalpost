@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from signalpost_agent.synthesize import synthesize  # noqa: E402
+from signalpost_agent.synthesize import _financial_year, synthesize  # noqa: E402
 
 PAGE_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
@@ -37,6 +37,15 @@ main{max-width:1100px;margin:0 auto;padding:0 1.2rem 3rem;display:grid;gap:1rem}
 .badge{display:inline-block;font-size:.72rem;padding:.15rem .5rem;border-radius:1rem;margin-right:.35rem;margin-top:.4rem}
 .b-ok{background:#064e3b;color:var(--ok)}.b-warn{background:#78350f;color:var(--warn)}.b-bad{background:#7f1d1d;color:var(--bad)}.b-info{background:#0c4a6e;color:var(--accent)}
 #detail{display:none}
+#compare-bar{display:none;margin:.8rem 0}
+.cmp-btn{background:var(--accent);color:#0f172a;border:none;border-radius:.6rem;padding:.6rem 1.1rem;font-size:.95rem;font-weight:600;cursor:pointer}
+.cmp-clear{color:var(--muted);cursor:pointer;font-size:.85rem;margin-left:.8rem}
+.cmp-label{display:inline-flex;align-items:center;gap:.35rem;font-size:.75rem;color:var(--muted);cursor:pointer;margin-bottom:.4rem}
+.cmp-check{accent-color:var(--accent);cursor:pointer}
+table.cmp{width:100%;border-collapse:collapse;font-size:.92rem}
+table.cmp th,table.cmp td{padding:.55rem .7rem;border-bottom:1px solid #334155;text-align:left;vertical-align:top}
+table.cmp th.rowhead{color:var(--muted);font-weight:600;width:11rem}
+table.cmp tr:first-child th{color:var(--accent)}
 #detail .back{color:var(--accent);cursor:pointer;margin-bottom:1rem;display:inline-block}
 .sec{background:var(--card);border-radius:.8rem;padding:1.1rem;margin-bottom:1rem}
 .sec h2{font-size:1.05rem;margin-bottom:.6rem;color:var(--accent)}
@@ -51,6 +60,7 @@ footer{text-align:center;color:var(--muted);font-size:.8rem;padding:2rem}
 <h1>Signalpost — Company Profiles</h1>
 <p id="runinfo"></p>
 <input id="search" type="search" placeholder="Search companies…" autocomplete="off">
+<div id="compare-bar"></div>
 </header>
 <main id="list" class="list"></main>
 <main id="detail"></main>
@@ -75,9 +85,48 @@ function renderList(filter){
   const q = (filter||'').toLowerCase();
   list.innerHTML = DATA.profiles
     .filter(p => !q || p.name.toLowerCase().includes(q) || p.organisation_number.includes(q))
-    .map((p,i) => `<div class="card" data-i="${DATA.profiles.indexOf(p)}"><h3>${esc(p.name)}</h3><div class="meta">${esc(p.headline)}<br>${esc(p.organisation_number)}</div><div>${badges(p)}</div></div>`).join('')
+    .map(p => { const idx = DATA.profiles.indexOf(p);
+      const checked = compared.has(idx) ? ' checked' : '';
+      return `<div class="card" data-i="${idx}"><label class="cmp-label"><input type="checkbox" class="cmp-check"${checked} onclick="toggleCompare(${idx}, event)"> compare</label><h3>${esc(p.name)}</h3><div class="meta">${esc(p.headline)}<br>${esc(p.organisation_number)}</div><div>${badges(p)}</div></div>`;}).join('')
     || '<p style="color:var(--muted)">No matches.</p>';
   list.querySelectorAll('.card').forEach(c => c.onclick = () => showDetail(+c.dataset.i));
+}
+const compareBar = document.getElementById('compare-bar');
+const compared = new Set();
+function toggleCompare(i, ev){
+  ev.stopPropagation();
+  if(ev.target.checked) compared.add(i); else compared.delete(i);
+  renderCompareBar();
+}
+function renderCompareBar(){
+  if(compared.size >= 2){
+    compareBar.style.display='block';
+    compareBar.innerHTML = `<button class="cmp-btn" onclick="showCompare()">Compare ${compared.size} companies</button><span class="cmp-clear" onclick="clearCompare()">clear selection</span>`;
+  } else { compareBar.style.display='none'; compareBar.innerHTML=''; }
+}
+function clearCompare(){ compared.clear(); renderCompareBar(); renderList(search.value); }
+function money(v){
+  if(v==null || isNaN(+v)) return '—';
+  const n = +v;
+  if(Math.abs(n) >= 1e6) return 'NOK ' + (n/1e6).toFixed(1) + 'm';
+  if(Math.abs(n) >= 1e3) return 'NOK ' + Math.round(n/1e3) + 'k';
+  return 'NOK ' + Math.round(n);
+}
+function showCompare(){
+  list.style.display='none'; detail.style.display='block';
+  const idx = [...compared];
+  const head = idx.map(i => `<th>${esc(DATA.profiles[i].name)}</th>`).join('');
+  const cell = fn => idx.map(i => `<td>${fn(DATA.profiles[i].compare)}</td>`).join('');
+  const frow = (label, fn) => `<tr><th class="rowhead">${label}</th>${cell(fn)}</tr>`;
+  detail.innerHTML = `<span class="back" onclick="back()">← all companies</span><h2 style="margin-bottom:1rem">Company comparison</h2><div class="sec"><table class="cmp"><tr><th></th>${head}</tr>` +
+    frow('Organisation number', c => esc(c.organisation_number)) +
+    frow('Legal form', c => esc(c.legal_form || '—')) +
+    frow('Municipality', c => esc(c.municipality || '—')) +
+    frow('Latest accounts', c => esc((c.financial && c.financial.year) || '—')) +
+    frow('Revenue', c => esc(c.financial ? money(c.financial.revenue) : '—')) +
+    frow('Annual result', c => esc(c.financial ? money(c.financial.annual_result) : '—')) +
+    `</table></div>`;
+  window.scrollTo(0,0);
 }
 function esc(s){return String(s??'').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
 // C2 fix: only http(s) URLs become links; anything else (javascript:, data:)
@@ -101,6 +150,40 @@ renderList('');
 """
 
 
+def _compare_record(envelope: dict) -> dict:
+    """Minimal structured data for the side-by-side comparison view.
+
+    Identity from the envelope profile; latest financials from the
+    (newest-first) normalized records.
+    """
+    prof = envelope.get("profile")
+    prof = prof if isinstance(prof, dict) else {}
+    evidence = prof.get("evidence")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    fin = evidence.get("financials")
+    records = []
+    if isinstance(fin, dict):
+        value = fin.get("value")
+        if isinstance(value, dict):
+            records = value.get("records") or []
+    latest = records[0] if records and isinstance(records[0], dict) else None
+    return {
+        "organisation_number": str(envelope.get("organisation_number") or ""),
+        "legal_form": prof.get("legal_form"),
+        "municipality": prof.get("municipality"),
+        "financial": (
+            {
+                "year": _financial_year(latest) or None,
+                "revenue": latest.get("revenue"),
+                "annual_result": latest.get("annual_result"),
+                "currency": latest.get("currency"),
+            }
+            if latest is not None
+            else None
+        ),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build static profile viewer")
     parser.add_argument("--envelopes", required=True)
@@ -111,7 +194,10 @@ def main() -> None:
     profiles = []
     for line in Path(args.envelopes).read_text(encoding="utf-8").splitlines():
         if line.strip():
-            profiles.append(synthesize(json.loads(line)))
+            envelope = json.loads(line)
+            profile = synthesize(envelope)
+            profile["compare"] = _compare_record(envelope)
+            profiles.append(profile)
     profiles.sort(key=lambda p: p["name"])
 
     import datetime
