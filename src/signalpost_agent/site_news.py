@@ -499,6 +499,7 @@ def fetch_site_news(
 
     todo = [u for u in candidate_urls if u not in seen_urls][:MAX_ARTICLES_FETCHED]
     diagnostics["candidates"] += len(todo)
+    requests += len(todo)  # one fetch per candidate article (see _extract)
 
     def _extract(url: str) -> tuple[str, dict[str, Any] | None, str]:
         if not _domain_matches(url, registry_domain):
