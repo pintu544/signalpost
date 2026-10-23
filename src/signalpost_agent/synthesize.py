@@ -139,8 +139,23 @@ def synthesize(envelope: dict[str, Any]) -> dict[str, Any]:
             res = latest.get("result")
         if res is None:
             res = latest.get("profit_loss")
-        sents = [(f"Latest submitted accounts ({year}): revenue {_fmt_money(rev)}, result {_fmt_money(res)}.",
-                  [_ref(fin_rec)])]
+        # v4 cross-check: the registry snapshot states the newest filed
+        # year. If the retrieved accounts end earlier, flag the gap —
+        # never label an older filing "latest" (Oct 17 audit failure).
+        registry_year = ""
+        raw_registry = profile.get("latest_submitted_accounts")
+        if raw_registry in (None, "") or not str(raw_registry)[:4].isdigit():
+            raw_registry = reg_val.get("latest_submitted_accounts")
+        if isinstance(raw_registry, (str, int)) and str(raw_registry)[:4].isdigit():
+            registry_year = str(raw_registry)[:4]
+        if registry_year and year != "n/a" and year < registry_year:
+            sents = [(f"Registry reports accounts through FY{registry_year}; "
+                      f"newest retrieved filing is FY{year}: revenue {_fmt_money(rev)}, "
+                      f"result {_fmt_money(res)}.",
+                      [_ref(fin_rec)])]
+        else:
+            sents = [(f"Latest submitted accounts ({year}): revenue {_fmt_money(rev)}, result {_fmt_money(res)}.",
+                      [_ref(fin_rec)])]
         if len(records) > 1:
             sents.append((f"{len(records)} years of accounts on file.", [_ref(fin_rec)]))
         section("Financials", sents)

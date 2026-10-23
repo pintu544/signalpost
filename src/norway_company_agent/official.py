@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import threading
 import time
 from typing import Any, Callable
@@ -86,19 +87,101 @@ def _record_year(item: Any) -> str | None:
     return None
 
 
+def _period_date(item: Any, key: str) -> "datetime.date | None":
+    period = item.get("regnskapsperiode") if isinstance(item, dict) else None
+    if isinstance(period, dict):
+        value = period.get(key)
+        if isinstance(value, str):
+            try:
+                return datetime.date.fromisoformat(value[:10])
+            except ValueError:
+                return None
+    return None
+
+
+def _period_days(item: Any) -> int | None:
+    """Length of the accounting period in days (fraDato..tilDato incl.)."""
+    start = _period_date(item, "fraDato")
+    end = _period_date(item, "tilDato")
+    if start is None or end is None or end < start:
+        return None
+    return (end - start).days + 1
+
+
+# A full accounting year is ~12 months; the band absorbs leap years,
+# 53-week years and small fiscal-calendar shifts.
+FULL_YEAR_MIN_DAYS = 300
+FULL_YEAR_MAX_DAYS = 400
+
+
+def _is_full_year(item: Any) -> bool:
+    days = _period_days(item)
+    return days is not None and FULL_YEAR_MIN_DAYS <= days <= FULL_YEAR_MAX_DAYS
+
+
+def _pick_series(records: list[Any]) -> list[Any]:
+    """Choose one consistent account-type series (v4).
+
+    Brønnøysund can return both company (SELSKAP) and consolidated
+    (KONSERN) accounts; mixing them makes 'latest' run-dependent. The
+    series is the account type of the newest filing, preferring SELSKAP
+    when both types end on the same newest date.
+    """
+    dated = [item for item in records if _period_date(item, "tilDato") is not None]
+    if not dated:
+        return list(records)
+    newest_end = max(_period_date(item, "tilDato") for item in dated)
+    newest_types = {item.get("regnskapstype") for item in dated
+                    if _period_date(item, "tilDato") == newest_end}
+    chosen = "SELSKAP" if "SELSKAP" in newest_types else next(
+        (item.get("regnskapstype") for item in dated
+         if _period_date(item, "tilDato") == newest_end), None)
+    series = [item for item in dated if item.get("regnskapstype") == chosen]
+    undated = [item for item in records if _period_date(item, "tilDato") is None]
+    return series + undated
+
+
+def _pick_latest(series: list[Any]) -> Any:
+    """The record that may carry the 'latest' label (v4).
+
+    Latest = newest period END DATE; within the newest end year, a full
+    ~12-month period beats a stub period (a short final period after a
+    fiscal-year change is not the year's annual accounts).
+    """
+    dated = [item for item in series if _period_date(item, "tilDato") is not None]
+    if not dated:
+        return series[0] if series else None
+    newest_year = max(_period_date(item, "tilDato").year for item in dated)
+    in_year = [item for item in dated if _period_date(item, "tilDato").year == newest_year]
+    full = [item for item in in_year if _is_full_year(item)]
+    pool = full or in_year
+    return max(pool, key=lambda item: (_period_date(item, "tilDato"),
+                                       _period_days(item) or 0))
+
+
 def normalize_financials(body: Any) -> dict[str, Any]:
     records = body if isinstance(body, list) else []
     if not records:
         return {"records": []}
     # Brønnøysund returns accounts oldest-first, but every consumer treats
-    # records[0] as the latest submitted accounts — sort newest-first so the
-    # "latest" label is truthful. Records without a parseable year go last,
-    # keeping their original relative order (stable sort).
-    dated = [(_record_year(item), item) for item in records]
-    dated.sort(key=lambda pair: (pair[0] is not None, pair[0] or ""), reverse=True)
+    # records[0] as the latest submitted accounts. v4: pick one consistent
+    # account-type series, put the true latest first (period end date,
+    # full-year preferred over a same-year stub), the rest newest-first.
+    # Records without a parseable period go last, in original order.
+    series = _pick_series(records)
+    latest = _pick_latest(series)
+    rest = [item for item in series if item is not latest]
+    rest.sort(key=lambda item: (_period_date(item, "tilDato") is not None,
+                                _period_date(item, "tilDato") or datetime.date.min,
+                                _period_days(item) or 0), reverse=True)
+    ordered = ([latest] if latest is not None else []) + rest
     normalized = []
-    for _, item in dated[:3]:
+    for item in ordered[:3]:
+        days = _period_days(item)
         normalized.append({
+            "period_days": days,
+            "period_kind": ("full_year" if _is_full_year(item)
+                            else "partial" if days is not None else "unknown"),
             "record_id": item.get("id"),
             "account_type": item.get("regnskapstype"),
             "period": item.get("regnskapsperiode"),
