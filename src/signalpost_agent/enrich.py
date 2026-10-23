@@ -52,8 +52,11 @@ def enrich_recall(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, in
             website_value.get("final_url", ""), value=deep_value,
             note="No publishable facts; ambiguous candidates withheld")
 
-    # T2.2 — news signals
-    news = fetch_news(org, legal_name, registry_domain)
+    # T2.2 — news signals (external + company-site connector fed by T2.1)
+    news = fetch_news(org, legal_name, registry_domain,
+                      news_urls=deep["news_urls"],
+                      site_url=website_value.get("final_url", ""),
+                      site_content_verified=deep["site_content_verified"])
     requests += news["requests"]
     if news["items"]:
         records["news"] = _evidence_record(
@@ -92,6 +95,7 @@ def enrich_recall(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, in
         value={"website_deep_facts": len(exact_facts),
                "website_deep_ambiguous": len(ambiguous_facts),
                "news_items": len(news["items"]),
+               "news_diagnostics": news.get("diagnostics", {}),
                "jobs": len(jobs["jobs"])},
         note="Slice 2 recall connectors completed")
     return records, metrics

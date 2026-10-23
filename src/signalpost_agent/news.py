@@ -213,23 +213,39 @@ def _is_exact(org_number: str, legal_name: str, item: dict[str, Any],
     return False, ""
 
 
-def fetch_news(org_number: str, legal_name: str, registry_domain: str = "") -> dict[str, Any]:
+def fetch_news(org_number: str, legal_name: str, registry_domain: str = "",
+               news_urls: list[str] | None = None, site_url: str = "",
+               site_content_verified: bool = True) -> dict[str, Any]:
     """Return {'items': [...]} — entity-gated news items, newest first.
 
-    W7: the 4 source fetches (2 queries x RSS+GDELT) run in parallel and GDELT
+    Sources: Google News RSS + GDELT (external), plus the company's own
+    website via site_news (T2.2b) when deepcrawl found news pages.
+
+    W7: the source fetches (queries x RSS+GDELT) run in parallel and GDELT
     uses a short timeout — worst case ~12s per company, not 40s sequential.
     """
     from concurrent.futures import ThreadPoolExecutor  # noqa: E402
+
+    from .entity_gate import distinctive_name  # noqa: E402
 
     started = time.monotonic()
     seen: set[str] = set()
     gated: list[dict[str, Any]] = []
     requests = 0
+    diagnostics: dict[str, Any] = {
+        "external": {"candidates": 0, "published": 0, "dropped": {"entity": 0}},
+    }
 
     queries = [f'"{org_number}"', f'"{legal_name}" Norway']
+    # v4: distinctive-name variants — coverage usually uses the trading
+    # name without the legal-form suffix. The entity gate is unchanged;
+    # these queries only widen what the gate gets to see.
+    distinctive = distinctive_name(legal_name)
+    if distinctive and distinctive != legal_name and len(distinctive) >= 4:
+        queries.append(f'"{distinctive}" Norway')
     jobs = []
     candidates: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=min(8, 2 * len(queries))) as pool:
         for query in queries:
             jobs.append(("rss", pool.submit(_google_news_rss, query)))
             jobs.append(("gdelt", pool.submit(_gdelt, query)))
@@ -240,20 +256,23 @@ def fetch_news(org_number: str, legal_name: str, registry_domain: str = "") -> d
                 items = []
             requests += 1  # count every attempted source fetch (W7 secondary)
             for item in items:
+                diagnostics["external"]["candidates"] += 1
                 url = item.get("url") or ""
                 if not url or url in seen:
                     continue
                 seen.add(url)
                 exact, proof = _is_exact(org_number, legal_name, item, registry_domain)
-                if exact:
-                    item["entity_proof"] = proof
-                    item["organisation_number"] = org_number
-                    # v2: normalize for verified-pool matching (after gating,
-                    # so the entity check sees the original title).
-                    item["published_original"] = item.get("published", "")
-                    item["published"] = _normalize_date(item.get("published", ""))
-                    item["title"] = _clean_title(item.get("title", ""))
-                    candidates.append(item)
+                if not exact:
+                    diagnostics["external"]["dropped"]["entity"] += 1
+                    continue
+                item["entity_proof"] = proof
+                item["organisation_number"] = org_number
+                # v2: normalize for verified-pool matching (after gating,
+                # so the entity check sees the original title).
+                item["published_original"] = item.get("published", "")
+                item["published"] = _normalize_date(item.get("published", ""))
+                item["title"] = _clean_title(item.get("title", ""))
+                candidates.append(item)
 
     # H2 fix: resolve URLs in parallel (was serial; 10s timeout × N items
     # would block). Only Google News redirects need resolution.
@@ -272,7 +291,26 @@ def fetch_news(org_number: str, legal_name: str, registry_domain: str = "") -> d
             continue
         seen.add(item["url"])
         gated.append(item)
+    diagnostics["external"]["published"] = len(gated)
 
+    # T2.2b — the company's own website (v4): deepcrawl's news pages mined
+    # for dated posts, EXACT by the verified-domain proof.
+    if registry_domain and (news_urls or site_url):
+        from .site_news import fetch_site_news  # noqa: E402
+
+        site = fetch_site_news(org_number, legal_name, registry_domain,
+                               news_urls or [], site_url=site_url,
+                               site_content_verified=site_content_verified)
+        requests += site["requests"]
+        diagnostics["site"] = site["diagnostics"]
+        for item in site["items"]:
+            if item["url"] in seen:
+                continue
+            seen.add(item["url"])
+            gated.append(item)
+
+    gated.sort(key=lambda i: i.get("published", ""), reverse=True)
     return {"items": gated[:MAX_ITEMS_PER_COMPANY],
             "requests": requests,
+            "diagnostics": diagnostics,
             "elapsed_ms": int((time.monotonic() - started) * 1000)}
