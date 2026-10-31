@@ -156,6 +156,16 @@ def synthesize(envelope: dict[str, Any]) -> dict[str, Any]:
         else:
             sents = [(f"Latest submitted accounts ({year}): revenue {_fmt_money(rev)}, result {_fmt_money(res)}.",
                       [_ref(fin_rec)])]
+        # v5: a partial-period "latest" (e.g. a stub after a fiscal-year
+        # change, when no full year exists for the newest end year) must
+        # not read as like-for-like with full-year filings — flag it.
+        if latest.get("period_kind") == "partial":
+            days = latest.get("period_days")
+            span = f" of {days} days" if isinstance(days, int) and days > 0 else ""
+            sents.append((f"The newest filing covers a partial period{span}, "
+                          f"not a full accounting year; its figures are not "
+                          f"directly comparable with full-year filings.",
+                          [_ref(fin_rec)]))
         if len(records) > 1:
             sents.append((f"{len(records)} years of accounts on file.", [_ref(fin_rec)]))
         section("Financials", sents)
