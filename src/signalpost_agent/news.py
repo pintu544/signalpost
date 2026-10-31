@@ -7,6 +7,10 @@ Sources (no API keys):
 Entity discipline: an item is EXACT only when the 9-digit org number appears
 in the title/snippet, or the legal name appears in the title AND the item is
 from a Norwegian outlet or mentions Norway. Name-only foreign hits abstain.
+
+Date discipline (v5): an item publishes only with a real, parseable
+publication date — a missing or unparseable stamp drops the item
+(``dropped.undated``), matching the company-site connector's rule.
 """
 from __future__ import annotations
 
@@ -25,6 +29,10 @@ from .entity_gate import _org_number_variants
 USER_AGENT = "signalpost-agent/1.0 (+https://github.com/pintu544/signalpost)"
 TIMEOUT = 12
 MAX_ITEMS_PER_COMPANY = 10
+
+# Shape of a successfully normalized date (see _normalize_date): anything
+# else is the raw source string passed through, i.e. not a real date.
+_ISO_STAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 
 def _fetch(url: str, timeout: int = TIMEOUT) -> bytes | None:
@@ -233,7 +241,8 @@ def fetch_news(org_number: str, legal_name: str, registry_domain: str = "",
     gated: list[dict[str, Any]] = []
     requests = 0
     diagnostics: dict[str, Any] = {
-        "external": {"candidates": 0, "published": 0, "dropped": {"entity": 0}},
+        "external": {"candidates": 0, "published": 0,
+                     "dropped": {"entity": 0, "undated": 0}},
     }
 
     queries = [f'"{org_number}"', f'"{legal_name}" Norway']
@@ -271,6 +280,14 @@ def fetch_news(org_number: str, legal_name: str, registry_domain: str = "",
                 # so the entity check sees the original title).
                 item["published_original"] = item.get("published", "")
                 item["published"] = _normalize_date(item.get("published", ""))
+                # v5: publish ONLY with a real date. _normalize_date keeps
+                # unparseable input verbatim ("never blank"), so an item
+                # whose stamp is missing or garbage would otherwise publish
+                # undated — the site connector drops those; so does this
+                # path now.
+                if not _ISO_STAMP_RE.match(item["published"]):
+                    diagnostics["external"]["dropped"]["undated"] += 1
+                    continue
                 item["title"] = _clean_title(item.get("title", ""))
                 candidates.append(item)
 
