@@ -17,6 +17,9 @@ ad from THIS company —
     name — a parent company's postings embedded on the page are rejected;
   - ``datePosted`` is required and ``validThrough`` in the past drops
     the posting (expired ads are not current ads).
+
+v5: JobPosting nodes wrapped in a JSON-LD ``@graph`` (or nested lists)
+are extracted too — a flat block scan silently missed them.
 """
 from __future__ import annotations
 
@@ -48,6 +51,19 @@ def _hiring_matches(hiring_name: str, legal_name: str) -> bool:
     if not hiring_name or not hiring_name.strip():
         return True
     return bool(_norm_name(hiring_name)) and _norm_name(hiring_name) == _norm_name(legal_name)
+
+
+def _walk_jsonld(node: Any, out: list[dict[str, Any]]) -> None:
+    """Collect every dict in a JSON-LD block, descending into ``@graph``
+    and nested lists (v5: many CMSs wrap JobPosting nodes in ``@graph``;
+    a flat scan silently misses those postings entirely)."""
+    if isinstance(node, dict):
+        out.append(node)
+        for value in node.values():
+            _walk_jsonld(value, out)
+    elif isinstance(node, list):
+        for value in node:
+            _walk_jsonld(value, out)
 
 
 def _parse_date(value: Any) -> datetime.date | None:
@@ -111,10 +127,9 @@ def extract_jobs_from_career_pages(
             metadata = extruct.extract(html_text, base_url=url, syntaxes=["json-ld"])
             raw_postings: list[dict[str, Any]] = []
             for block in metadata.get("json-ld", []):
-                items = block if isinstance(block, list) else [block]
-                for item in items:
-                    if not isinstance(item, dict):
-                        continue
+                nodes: list[dict[str, Any]] = []
+                _walk_jsonld(block, nodes)
+                for item in nodes:
                     types = item.get("@type")
                     type_set = set(types if isinstance(types, list) else [types])
                     if "JobPosting" in type_set:
