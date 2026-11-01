@@ -197,15 +197,26 @@ def synthesize(envelope: dict[str, Any]) -> dict[str, Any]:
     else:
         section("Locations", [("No registered subunits found in checked sources.", [_ref(loc_rec)])])
 
-    # 5. Online presence
+    # 5. Online presence — registry site, else the v6 search-discovered
+    # site (stored under its own evidence field so the two sources are
+    # never conflated), plus social links found on the verified site.
     web_rec = _rec(evidence, "website")
+    disc_rec = _rec(evidence, "website_discovered")
     deep_rec = _rec(evidence, "website_deep")
+    social_rec = _rec(evidence, "social")
+    social_links = [l for l in _val_list(social_rec, "links") if isinstance(l, dict)]
     facts = [f for f in _val_list(deep_rec, "facts") if isinstance(f, dict)]
     if web_rec.get("status") == "available":
+        site_rec, site_label = web_rec, "Official website"
+    elif disc_rec.get("status") == "available":
+        site_rec, site_label = disc_rec, "Official website (found by web search)"
+    else:
+        site_rec, site_label = {}, ""
+    if site_rec:
         sents = []
-        web_val = web_rec.get("value") if isinstance(web_rec.get("value"), dict) else {}
-        final_url = _str(web_val.get("final_url"))
-        sents.append((f"Official website: {final_url}.", [_ref(web_rec)]))
+        site_val = site_rec.get("value") if isinstance(site_rec.get("value"), dict) else {}
+        final_url = _str(site_val.get("final_url")) or _str(site_rec.get("source_url"))
+        sents.append((f"{site_label}: {final_url}.", [_ref(site_rec)]))
         emails = [_str(f.get("value")) for f in facts if f.get("field") == "contact_email"]
         phones = [_str(f.get("value")) for f in facts if f.get("field") == "contact_phone"]
         emails = [e for e in emails if e]
@@ -217,6 +228,12 @@ def synthesize(envelope: dict[str, Any]) -> dict[str, Any]:
         about = next((f for f in facts if f.get("field") == "about_text"), None)
         if about and _str(about.get("value")):
             sents.append((f"About: {_str(about.get('value'))[:400]}", [_ref(deep_rec)]))
+        if social_links:
+            rendered = ", ".join(
+                f"{_str(l.get('platform'))} ({_str(l.get('url'))})"
+                for l in social_links[:6] if _str(l.get("platform")))
+            if rendered:
+                sents.append((f"Social profiles: {rendered}.", [_ref(social_rec)]))
         section("Online presence", sents)
     else:
         section("Online presence", [("No company website found in checked sources.", [_ref(web_rec)])])
@@ -244,6 +261,74 @@ def synthesize(envelope: dict[str, Any]) -> dict[str, Any]:
         section("Jobs", sents)
     else:
         section("Jobs", [("No open roles found on company career pages.", [_ref(jobs_rec)])])
+
+    # 8. Summary (v6, Soham feedback) — a short written story per company
+    # so a reader gets it fast. Assembled ONLY from the verified facts
+    # rendered above; an absent fact omits its clause, never a guess.
+    # Emitted only with registry-verified identity (W1 rule).
+    if reg_ok:
+        sum_sents: list[tuple[str, list[dict[str, Any]]]] = []
+        s_legal = _str(profile.get("legal_form")) or _str(reg_val.get("legal_form"))
+        s_muni = _str(profile.get("municipality"))
+        s_industry = _str(profile.get("industry_label"))
+        intro = f"{name} ({org})"
+        if s_legal:
+            intro += f" is a {s_legal}"
+        if s_muni:
+            intro += f" registered in {s_muni}"
+        intro += "."
+        if s_industry:
+            intro += f" Industry: {s_industry}."
+        intro_refs = [_ref(reg_rec)]
+        if records:
+            s_latest = records[0] if isinstance(records[0], dict) else {}
+            s_year = _financial_year(s_latest) or "n/a"
+            s_rev = s_latest.get("revenue")
+            if s_rev is None:
+                s_rev = s_latest.get("operating_revenue")
+            s_res = s_latest.get("annual_result")
+            if s_res is None:
+                s_res = s_latest.get("result")
+            if s_res is None:
+                s_res = s_latest.get("profit_loss")
+            intro += (f" Accounts are on file for {len(records)} year"
+                      f"{'s' if len(records) != 1 else ''}; the latest ({s_year}) "
+                      f"reports revenue {_fmt_money(s_rev)} and result {_fmt_money(s_res)}.")
+            intro_refs.append(_ref(fin_rec))
+        sum_sents.append((intro, intro_refs))
+        if site_rec:
+            s_val = site_rec.get("value") if isinstance(site_rec.get("value"), dict) else {}
+            s_url = _str(s_val.get("final_url")) or _str(site_rec.get("source_url"))
+            origin = " in the company register" if site_rec is web_rec else " by web search"
+            site_sent = f"A company website was found{origin}: {s_url}."
+            site_refs = [_ref(site_rec)]
+            if social_links:
+                plats = ", ".join(sorted({_str(l.get("platform"))
+                                          for l in social_links if _str(l.get("platform"))}))
+                if plats:
+                    site_sent += f" The site links to social profiles on {plats}."
+                    site_refs.append(_ref(social_rec))
+            sum_sents.append((site_sent, site_refs))
+        n_news, n_jobs = len(items), len(jobs)
+        if n_news or n_jobs:
+            bits = []
+            if n_news:
+                bits.append(f"{n_news} news item{'s' if n_news != 1 else ''}")
+            if n_jobs:
+                bits.append(f"{n_jobs} open role{'s' if n_jobs != 1 else ''}")
+            sum_sents.append((f"{' and '.join(bits)} "
+                              f"{'were' if n_news + n_jobs != 1 else 'was'} "
+                              f"found in checked sources.",
+                              [_ref(news_rec), _ref(jobs_rec)]))
+        elif not site_rec:
+            sum_sents.append(("No website, news items or open roles were found in checked sources.",
+                              [_ref(web_rec), _ref(news_rec), _ref(jobs_rec)]))
+        else:
+            sum_sents.append(("No news items or open roles were found in checked sources.",
+                              [_ref(news_rec), _ref(jobs_rec)]))
+        sections.insert(0, {"title": "Summary",
+                            "sentences": [{"text": t, "evidence": refs}
+                                          for t, refs in sum_sents]})
 
     legal_form = _str(profile.get("legal_form"))
     muni = _str(profile.get("municipality"))
