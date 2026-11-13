@@ -15,7 +15,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from .deepcrawl import extract_facts
+from .deepcrawl import extract_facts, probe_section_urls
 from .discover import discover_website, social_links_from_value
 from .jobs import extract_jobs_from_career_pages
 from .news import fetch_news
@@ -78,6 +78,31 @@ def enrich_recall(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, in
 
     # T2.1 — website deep crawl (structured facts from already-crawled pages)
     deep = extract_facts(org, legal_name, site_domain, site_record)
+    # v7 fix B/D — the crawl covers only the starter's ≤4 priority
+    # pages; when they surfaced no career or news section, probe the
+    # standard paths on the verified domain. Probed pages feed the
+    # jobs and site-news connectors below, whose gates still apply.
+    if site_domain and (not deep["career_urls"] or not deep["news_urls"]):
+        probed = probe_section_urls(
+            site_url or f"https://{site_domain}/",
+            need_career=not deep["career_urls"],
+            need_news=not deep["news_urls"])
+        requests += probed["requests"]
+        for probed_url in probed["career_urls"]:
+            if probed_url not in deep["career_urls"]:
+                deep["career_urls"].append(probed_url)
+        for probed_url in probed["news_urls"]:
+            if probed_url not in deep["news_urls"]:
+                deep["news_urls"].append(probed_url)
+    # v7 (fix A completion) — a search-discovered site passed discover's
+    # content gate, on excerpts or on full visible text; that gate is at
+    # least as strict as deepcrawl's excerpt-only recheck, so its proof
+    # stands as the site content verification for the jobs/news
+    # connectors. Without this a footer-verified site would starve them
+    # exactly as it starved the excerpt gate. Registry sites are
+    # unaffected (discovery does not run for them).
+    site_content_verified = (deep["site_content_verified"]
+                             or bool(discovery.get("proof")))
     # Only EXACT-verdict facts are published; AMBIGUOUS ones are recorded for
     # audit but never become claims (franchisor/provider/acquirer trap).
     exact_facts = [f for f in deep["facts"] if f["verdict"] == "exact"]
@@ -109,7 +134,7 @@ def enrich_recall(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, in
     news = fetch_news(org, legal_name, site_domain,
                       news_urls=deep["news_urls"],
                       site_url=site_url,
-                      site_content_verified=deep["site_content_verified"])
+                      site_content_verified=site_content_verified)
     requests += news["requests"]
     if news["items"]:
         records["news"] = _evidence_record(
@@ -126,7 +151,7 @@ def enrich_recall(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, in
     # C2: site_content_verified gates the jobs path too (franchisor trap)
     jobs = extract_jobs_from_career_pages(org, legal_name, site_domain,
                                           deep["career_urls"],
-                                          site_content_verified=deep["site_content_verified"])
+                                          site_content_verified=site_content_verified)
     requests += jobs["requests"]
     if jobs["jobs"]:
         records["jobs"] = _evidence_record(

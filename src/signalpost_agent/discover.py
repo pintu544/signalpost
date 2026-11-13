@@ -25,6 +25,11 @@ Method (keyless, $0 — no API keys, no paid search):
     number (digit-boundary-anchored). A name match is voided when the
     page also carries other companies' org numbers without ours
     (namesake/directory trap, reusing entity_gate.name_collision_risk).
+  - v7 (fix A): when the excerpt gate fails on an available crawl, the
+    same gate is retried on the site's full visible text (footer
+    included), fetched from the homepage and likely identity pages —
+    brand-led sites print their legal identity only there (proven live
+    on fyrifish.no). Acceptance semantics are unchanged.
 
 The returned ``website_record`` is shaped exactly like the starter's
 fetch_website evidence value (pages/final_url/registered_domain/
@@ -48,7 +53,7 @@ from .entity_gate import (
 
 USER_AGENT = "signalpost-agent/1.0 (+https://github.com/pintu544/signalpost)"
 TIMEOUT = 15
-MAX_CANDIDATES = 4
+MAX_CANDIDATES = 6
 
 # Registrable domains that are never the company's own website:
 # Norwegian company directories/aggregators, search engines, social
@@ -66,6 +71,10 @@ BLOCKED_DOMAINS = {
     "yra.no", "sokfirma.no", "firmadatabasen.no", "biztrac.no",
     "1850.no", "kredittsjekk.no", "visverdi.no", "nordata.io",
     "vexter.no", "flowfirma.no", "cybo.com",
+    # v7 (fix A2): directories observed burning the candidate budget in
+    # the v6 audit40 run (2026-11-13)
+    "creditsafe.com", "forvalt.no", "regnskapsbasen.no",
+    "setesdalswiki.no", "io.no", "byggsikt.no",
 }
 
 # Generic name tokens that say nothing about whose domain it is; used
@@ -225,6 +234,70 @@ def _crawl_texts(value: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+# Pages where a company prints its legal identity (v7 fix A probes).
+IDENTITY_PATHS = ("/kontakt", "/om-oss", "/kontakt-oss")
+
+
+def visible_text(raw: bytes | str) -> str:
+    """All visible text of an HTML page, footer included.
+
+    The excerpt view above (trafilatura main text) strips footers and
+    contact blocks — exactly where Norwegian companies print their
+    legal name and organisation number. BeautifulSoup text keeps them;
+    script/style/template content is removed first so hidden markup
+    cannot fake a match.
+    """
+    try:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(raw, "lxml")
+        for tag in soup(["script", "style", "noscript", "template"]):
+            tag.decompose()
+        return soup.get_text(" ")
+    except Exception:
+        return ""
+
+
+def _full_text_gate(
+    org_number: str,
+    legal_name: str,
+    value: dict[str, Any],
+    fetch: Callable[[str], bytes | None],
+) -> tuple[str, int]:
+    """v7 fix A — full-text fallback for the discovery gate.
+
+    When the excerpt gate fails on an available crawl, fetch the
+    homepage plus the likely identity pages (kontakt / om-oss /
+    kontakt-oss) on the crawled site's own origin, strip them to
+    visible text (footer included) and re-run verify_site_content on
+    the combined text. Acceptance semantics are unchanged — org number
+    OR full distinctive name, collision-guarded. Returns (proof,
+    requests); proof is "" when the full text does not verify either.
+    """
+    final_url = str(value.get("final_url") or "")
+    parsed = urllib.parse.urlparse(final_url)
+    if not parsed.netloc:
+        return "", 0
+    origin = f"{parsed.scheme or 'https'}://{parsed.netloc}"
+    urls = [final_url] + [origin + path for path in IDENTITY_PATHS]
+    text = _crawl_texts(value)
+    requests = 0
+    seen: set[str] = set()
+    for url in urls:
+        if url in seen:
+            continue
+        seen.add(url)
+        raw = fetch(url)
+        requests += 1
+        if not raw:
+            continue
+        text += "\n" + visible_text(raw)
+        proof = verify_site_content(org_number, legal_name, text)
+        if proof:
+            return proof, requests
+    return "", requests
+
+
 def social_links_from_value(value: Any) -> list[dict[str, str]]:
     """Shape a fetch_website value's social_links for evidence/synthesis.
 
@@ -256,6 +329,7 @@ def discover_website(
     *,
     searcher: Callable[[str], tuple[list[str], str]] | None = None,
     crawler: Callable[[str], tuple[dict[str, Any], dict[str, Any]]] | None = None,
+    fetcher: Callable[[str], bytes | None] | None = None,
     max_candidates: int = MAX_CANDIDATES,
 ) -> dict[str, Any]:
     """Search for the company's own website and content-verify a candidate.
@@ -313,6 +387,15 @@ def discover_website(
                 continue
             value = record.get("value") or {}
             proof = verify_site_content(org_number, legal_name, _crawl_texts(value))
+            gate = "excerpt" if proof else ""
+            if not proof:
+                # v7 fix A: the legal name / org number often live only
+                # in the footer, which main-text excerpts strip — retry
+                # the same gate on full visible text before rejecting.
+                proof, extra = _full_text_gate(org_number, legal_name, value,
+                                               fetcher or _fetch)
+                requests += extra
+                gate = "full_text" if proof else ""
             if not proof:
                 rejected.append({"domain": domain, "reason": "content_gate_failed"})
                 continue
@@ -322,6 +405,7 @@ def discover_website(
                 "final_url": final_url,
                 "domain": str(value.get("registered_domain") or _registered_domain(final_url)),
                 "proof": proof,
+                "gate": gate,
                 "website_record": record,
                 "social_links": social_links_from_value(value),
                 "requests": requests,

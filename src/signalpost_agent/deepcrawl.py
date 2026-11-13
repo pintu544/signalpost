@@ -30,6 +30,74 @@ DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 CAREER_HINTS = ("karriere", "career", "ledige-stillinger", "ledige_stillinger", "jobb", "jobs")
 NEWS_HINTS = ("nyhet", "news", "press", "aktuelt", "media")
 
+# v7 fix B — standard section paths probed on a verified domain when the
+# crawled priority pages surfaced no career/news section at all.
+CAREER_PROBE_PATHS = ("/karriere", "/ledige-stillinger", "/jobb-hos-oss",
+                      "/stillinger", "/jobb")
+NEWS_PROBE_PATHS = ("/nyheter", "/aktuelt", "/presse", "/pressemeldinger",
+                    "/nyhetsarkiv")
+
+
+def _fetch_bytes(url: str) -> bytes | None:
+    """SSRF-safe fetch via the starter's opener (same route as site_news).
+
+    Returns the body only on HTTP 200; any error or other status is None.
+    """
+    try:
+        import sys
+        import urllib.request
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from norway_company_agent.website import (  # noqa: E402
+            SAFE_OPENER,
+            USER_AGENT,
+            assert_public_url,
+        )
+
+        assert_public_url(url)
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with SAFE_OPENER.open(req, timeout=12) as resp:
+            if getattr(resp, "status", 200) != 200:
+                return None
+            return resp.read(1_000_000)
+    except Exception:
+        return None
+
+
+def probe_section_urls(
+    site_url: str,
+    *,
+    need_career: bool = True,
+    need_news: bool = True,
+    fetcher=None,
+) -> dict[str, Any]:
+    """v7 fix B — probe standard career/news paths on a verified site.
+
+    extract_facts only sees the ≤4 priority pages the starter crawled,
+    so a site whose career or news section was not among them starves
+    the jobs and site-news connectors. A probed page counts only on
+    HTTP 200 and is fed to those connectors unchanged — their own
+    entity and date gates still decide what publishes. First hit per
+    section wins, so the cost is bounded by the path lists.
+    """
+    fetch = fetcher or _fetch_bytes
+    result: dict[str, Any] = {"career_urls": [], "news_urls": [], "requests": 0}
+    parsed = urlparse(site_url or "")
+    if not parsed.netloc:
+        return result
+    origin = f"{parsed.scheme or 'https'}://{parsed.netloc}"
+    for key, paths, needed in (("career_urls", CAREER_PROBE_PATHS, need_career),
+                               ("news_urls", NEWS_PROBE_PATHS, need_news)):
+        if not needed:
+            continue
+        for path in paths:
+            url = origin + path
+            result["requests"] += 1
+            if fetch(url):
+                result[key].append(url)
+                break
+    return result
+
 def _distinctive_name(legal_name: str) -> str:
     """Strip Norwegian legal-form suffixes for content matching."""
     name = legal_name.strip()

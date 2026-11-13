@@ -20,18 +20,200 @@ ad from THIS company —
 
 v5: JobPosting nodes wrapped in a JSON-LD ``@graph`` (or nested lists)
 are extracted too — a flat block scan silently missed them.
+
+v7 (fix C): career pages often carry no JSON-LD at all. When a career
+page yields no JobPosting nodes, an HTML fallback follows same-domain
+posting links from the page and lets each posting page prove itself:
+it publishes only when the posting page itself names the company or
+its organisation number (Soham's rescore rule). The title comes from
+the page heading, the date from a visibly stated publish date when
+there is one, and a stated application deadline in the past marks the
+posting closed. The JSON-LD path stays primary and unchanged.
 """
 from __future__ import annotations
 
 import datetime
 import re
 import time
+import urllib.parse
 from typing import Any
 
-from .entity_gate import assess_candidate, distinctive_name
+from .entity_gate import _domain_matches, assess_candidate, distinctive_name
 
 MAX_PAGES = 5
 MAX_JOBS_PER_COMPANY = 20
+MAX_POSTING_FETCHES = 8
+
+# Path segments that mark a link as a single posting rather than
+# another listing or navigation page (fix C link discovery).
+_POSTING_PATH_HINTS = ("stilling", "job", "ledig", "karriere", "career",
+                       "annonse", "utlysning", "position")
+# Anchor texts that are section navigation, never a single posting.
+_NAV_TEXTS = {
+    "ledige stillinger", "se ledige stillinger", "alle stillinger",
+    "se alle stillinger", "flere stillinger", "jobb hos oss",
+    "karriere", "careers", "jobs", "open positions", "ledige jobber",
+}
+
+_MONTHS_NO = {"januar": 1, "februar": 2, "mars": 3, "april": 4, "mai": 5,
+              "juni": 6, "juli": 7, "august": 8, "september": 9,
+              "oktober": 10, "november": 11, "desember": 12}
+_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_NO_LONG_DATE_RE = re.compile(
+    r"(\d{1,2})\.?\s+(" + "|".join(_MONTHS_NO) + r")\s+(\d{4})", re.IGNORECASE)
+_NO_NUMERIC_DATE_RE = re.compile(r"(\d{1,2})\.(\d{1,2})\.(\d{4})")
+
+
+def _find_date(segment: str) -> datetime.date | None:
+    """First real date (ISO, Norwegian long or numeric form) in a text
+    segment; None when there is none. Never invents a date."""
+    match = _ISO_DATE_RE.search(segment)
+    if match:
+        parsed = _parse_date(match.group(0))
+        if parsed:
+            return parsed
+    match = _NO_LONG_DATE_RE.search(segment)
+    if match:
+        try:
+            return datetime.date(int(match.group(3)),
+                                 _MONTHS_NO[match.group(2).casefold()],
+                                 int(match.group(1)))
+        except ValueError:
+            return None
+    match = _NO_NUMERIC_DATE_RE.search(segment)
+    if match:
+        try:
+            return datetime.date(int(match.group(3)), int(match.group(2)),
+                                 int(match.group(1)))
+        except ValueError:
+            return None
+    return None
+
+
+def _posting_links(html_text: str, page_url: str,
+                   registry_domain: str) -> list[str]:
+    """Same-domain posting links from a career page (fix C).
+
+    A link qualifies when it stays on the verified domain, is not the
+    career page itself, and either sits deeper than the career page's
+    path or carries a posting-ish path segment. Navigation labels are
+    skipped. The links are only fetch candidates — each posting page
+    must still prove itself in _job_from_posting_page.
+    """
+    links: list[str] = []
+    seen: set[str] = set()
+    try:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html_text, "lxml")
+    except Exception:
+        return links
+    page_path = urllib.parse.urlparse(page_url).path.rstrip("/")
+    page_depth = len([s for s in page_path.split("/") if s])
+    for anchor in soup.find_all("a", href=True):
+        absolute = urllib.parse.urljoin(
+            page_url, str(anchor.get("href") or "")).split("#")[0]
+        parsed = urllib.parse.urlparse(absolute)
+        if parsed.scheme not in ("http", "https"):
+            continue
+        if not _domain_matches(absolute, registry_domain):
+            continue
+        if absolute.rstrip("/") == page_url.rstrip("/") or absolute in seen:
+            continue
+        segments = [s for s in parsed.path.split("/") if s]
+        if page_path:
+            deeper = (parsed.path.startswith(page_path + "/")
+                      and len(segments) > page_depth)
+        else:
+            deeper = len(segments) >= 2
+        hinted = any(h in parsed.path.casefold() for h in _POSTING_PATH_HINTS)
+        if not (deeper or hinted):
+            continue
+        label = re.sub(r"\s+", " ", anchor.get_text(" ", strip=True)).casefold()
+        if label in _NAV_TEXTS:
+            continue
+        seen.add(absolute)
+        links.append(absolute)
+    return links
+
+
+def _application_deadline(text: str) -> datetime.date | None:
+    """The visibly stated application deadline ('Søknadsfrist: …')."""
+    match = re.search(r"søknadsfrist", text, re.IGNORECASE)
+    if not match:
+        return None
+    return _find_date(text[match.end():match.end() + 48])
+
+
+def _visible_date(text: str, soup: Any) -> datetime.date | None:
+    """A publish date visibly stated on a posting page, else None.
+
+    Sources, in order: a ``<time datetime>`` stamp, an
+    ``article:published_time`` meta, and a labelled phrase
+    ('Publisert …' / 'Published …'). An unlabelled bare date is not a
+    publish date, so nothing is guessed.
+    """
+    for time_el in soup.find_all("time"):
+        parsed = _parse_date(time_el.get("datetime") or "")
+        if parsed:
+            return parsed
+    meta = soup.find("meta", attrs={"property": "article:published_time"})
+    if meta and meta.get("content"):
+        parsed = _parse_date(meta["content"])
+        if parsed:
+            return parsed
+    label = re.search(r"(publisert|published|lagt ut)\b", text, re.IGNORECASE)
+    if label:
+        return _find_date(text[label.end():label.end() + 48])
+    return None
+
+
+def _job_from_posting_page(html_text: str, url: str, org_number: str,
+                           legal_name: str,
+                           today: datetime.date) -> tuple[dict[str, Any] | None, str]:
+    """Fix C gate — build a job from a single posting page, or abstain.
+
+    Publishes only when the posting page itself names the company or
+    its organisation number (verify_site_content, the discovery gate:
+    org number OR full distinctive name, collision-guarded). Returns
+    (job, "") or (None, reason) with reason one of: no_entity_proof,
+    no_title, closed.
+    """
+    from bs4 import BeautifulSoup
+
+    from .discover import verify_site_content, visible_text
+
+    text = visible_text(html_text)
+    proof = verify_site_content(org_number, legal_name, text)
+    if not proof:
+        return None, "no_entity_proof"
+    deadline = _application_deadline(text)
+    if deadline is not None and deadline < today:
+        return None, "closed"
+    soup = BeautifulSoup(html_text, "lxml")
+    title = ""
+    own_names = {legal_name.casefold(), distinctive_name(legal_name).casefold()}
+    for heading in soup.find_all(["h1", "h2"]):
+        candidate = re.sub(r"\s+", " ", heading.get_text(" ", strip=True)).strip()
+        if candidate and candidate.casefold() not in own_names:
+            title = candidate
+            break
+    if not title and soup.title:
+        title = re.sub(r"\s+", " ", soup.title.get_text(" ", strip=True)).strip()
+    if not title:
+        return None, "no_title"
+    posted = _visible_date(text, soup)
+    return {
+        "title": title[:200],
+        "hiring_organization": legal_name[:200],
+        "date_posted": posted.isoformat() if posted else "",
+        "employment_type": "",
+        "url": url,
+        "url_is_posting_specific": True,
+        "entity_proof": ([f"organisation_number:{org_number}"]
+                         if proof == "organisation_number"
+                         else ["legal_name_on_posting_page"]),
+    }, ""
 
 
 def _norm_name(name: str) -> str:
@@ -106,11 +288,12 @@ def extract_jobs_from_career_pages(
     requests = 0
     seen: set[str] = set()
     dropped = {"hiring_org_mismatch": 0, "missing_date_posted": 0, "expired": 0}
+    html_fallback = {"fetches": 0, "published": 0, "dropped": {}}
     today = today or datetime.date.today()
 
     if not site_content_verified:
         return {"jobs": [], "requests": 0, "skipped": "site_content_not_verified",
-                "dropped": dropped,
+                "dropped": dropped, "html_fallback": html_fallback,
                 "elapsed_ms": int((time.monotonic() - started) * 1000)}
 
     for url in career_urls[:MAX_PAGES]:
@@ -175,10 +358,45 @@ def extract_jobs_from_career_pages(
                 })
                 if len(jobs) >= MAX_JOBS_PER_COMPANY:
                     break
+            # v7 fix C — HTML fallback, only when this page carried no
+            # JobPosting JSON-LD at all: follow same-domain posting
+            # links and let each posting page prove itself.
+            if not raw_postings:
+                for link in _posting_links(html_text, url, registry_domain):
+                    if (html_fallback["fetches"] >= MAX_POSTING_FETCHES
+                            or len(jobs) >= MAX_JOBS_PER_COMPANY):
+                        break
+                    if assess_candidate(org_number, legal_name,
+                                        registry_domain, link)["verdict"] != "exact":
+                        continue
+                    html_fallback["fetches"] += 1
+                    try:
+                        assert_public_url(link)
+                        req = urllib.request.Request(link, headers={"User-Agent": USER_AGENT})
+                        with SAFE_OPENER.open(req, timeout=12) as resp:
+                            raw_page = resp.read(1_000_000)
+                            requests += 1
+                        job, reason = _job_from_posting_page(
+                            raw_page.decode("utf-8", errors="replace"),
+                            link, org_number, legal_name, today)
+                    except Exception:
+                        continue
+                    if job is None:
+                        drops = html_fallback["dropped"]
+                        drops[reason] = drops.get(reason, 0) + 1
+                        continue
+                    key = (job["title"] + job["hiring_organization"]
+                           + job["url"]).casefold()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    jobs.append(job)
+                    html_fallback["published"] += 1
         except Exception:
             continue
         if len(jobs) >= MAX_JOBS_PER_COMPANY:
             break
 
     return {"jobs": jobs, "requests": requests, "dropped": dropped,
+            "html_fallback": html_fallback,
             "elapsed_ms": int((time.monotonic() - started) * 1000)}
