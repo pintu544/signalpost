@@ -111,3 +111,97 @@ def org_number_pattern(org_number: str) -> "re.Pattern[str] | None":
         return None
     alternation = "|".join(re.escape(v) for v in sorted(variants, key=len, reverse=True))
     return re.compile(rf"(?<!\d)(?:{alternation})(?!\d)")
+
+
+def full_legal_name_pattern(legal_name: str) -> "re.Pattern[str] | None":
+    """Whole-word regex for the FULL legal name, legal-form suffix included.
+
+    v8: the strict page-level identity standard. 'FRITID AS' matches only
+    as whole words — the bare distinctive word 'Fritid' (an ordinary
+    Norwegian word for *leisure*) never proves identity on its own.
+    """
+    name = " ".join((legal_name or "").split())
+    if len(name) < 3:
+        return None
+    return re.compile(rf"(?<!\w){re.escape(name)}(?!\w)", re.IGNORECASE)
+
+
+def page_identity_proof(org_number: str, legal_name: str, text: str) -> str:
+    """Strict page-level identity proof: "org_number" | "legal_name" | "".
+
+    A page proves the company only when it shows the organisation number
+    (digit-boundary-anchored) or the full legal name as whole words,
+    collision-guarded (a name match surrounded by other companies' org
+    numbers without ours is a directory/namesake page, not proof).
+    """
+    if not text:
+        return ""
+    pattern = org_number_pattern(org_number)
+    if pattern and pattern.search(text):
+        return "org_number"
+    name_re = full_legal_name_pattern(legal_name)
+    if name_re and name_re.search(text):
+        if name_collision_risk(legal_name, text):
+            return ""
+        return "legal_name"
+    return ""
+
+
+# Query params that never change which article a URL identifies: feed
+# variants (Joomla & co. serve the same article with format=feed) and
+# click trackers. Stripping them makes one story dedupe to one URL.
+_FEED_PARAM_VALUES = {"feed", "rss", "rss2", "atom"}
+_TRACKING_PARAMS = {"fbclid", "gclid", "dclid", "msclkid", "oc"}
+
+
+def canonical_url(url: str) -> str:
+    """Canonical form of an item URL for dedupe and output (v8).
+
+    Lowercases scheme/host, drops default ports, collapses repeated
+    path slashes, drops the fragment, and removes feed-variant and
+    tracking query params (``format=feed``, ``type=atom``, ``utm_*``…).
+    Joomla article URLs also drop ``catid`` (a category id — the same
+    article id under another category is the same article). Remaining
+    params are sorted so parameter order cannot split a duplicate.
+    """
+    from urllib.parse import unquote_plus, urlsplit, urlunsplit
+
+    try:
+        parts = urlsplit((url or "").strip())
+    except Exception:
+        return url or ""
+    scheme = (parts.scheme or "https").lower()
+    host = (parts.hostname or "").lower()
+    if not host:
+        return url or ""
+    port = parts.port
+    netloc = host
+    if port and not (scheme == "http" and port == 80) \
+            and not (scheme == "https" and port == 443):
+        netloc = f"{host}:{port}"
+    path = re.sub(r"/{2,}", "/", parts.path or "/")
+    if len(path) > 1 and path.endswith("/"):
+        path = path.rstrip("/")
+    # Filter the RAW query pairs (decoded only for the drop decisions) so
+    # surviving params keep their original spelling — re-encoding would
+    # mangle values like Joomla's id=10:arsmote.
+    raw_pairs = [p for p in parts.query.split("&") if p] if parts.query else []
+    decoded = []
+    for pair in raw_pairs:
+        key, _, value = pair.partition("=")
+        decoded.append((unquote_plus(key).lower(), unquote_plus(value).lower()))
+    is_joomla_article = ("view", "article") in decoded \
+        and any(k == "id" for k, _v in decoded)
+    kept: list[str] = []
+    for pair, (low_key, low_val) in zip(raw_pairs, decoded):
+        if low_key.startswith("utm_") or low_key in _TRACKING_PARAMS:
+            continue
+        if low_key == "format" and low_val in _FEED_PARAM_VALUES:
+            continue
+        if low_key == "type" and low_val in _FEED_PARAM_VALUES:
+            continue
+        if is_joomla_article and low_key == "catid":
+            continue
+        kept.append(pair)
+    kept.sort()
+    return urlunsplit((scheme, netloc, path, "&".join(kept), ""))

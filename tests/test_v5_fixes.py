@@ -44,13 +44,26 @@ def _ext_item(title, url, published):
             "provider": "gdelt"}
 
 
+# v8: external items must also prove themselves on their article page.
+# This fixture page carries the org number and a JSON-LD publish stamp
+# matching the dated listing item, so the date assertions below test
+# the same contract as before, one gate later.
+_ARTICLE_PAGE = (
+    "<html><head><script type=\"application/ld+json\">"
+    "{\"@context\": \"https://schema.org\", \"@type\": \"NewsArticle\", "
+    "\"headline\": \"Sak\", \"datePublished\": \"2026-10-13T07:00:00Z\"}"
+    "</script></head><body><h1>Sak</h1>"
+    "<p>Om EKSEMPEL AS (org.nr 123 456 789).</p></body></html>").encode()
+
+
 class ExternalNewsDateTests(unittest.TestCase):
     def _run(self, gdelt_items):
         def _gdelt(query):
             return list(gdelt_items) if "123456789" in query else []
 
         with patch.object(news, "_google_news_rss", return_value=[]), \
-                patch.object(news, "_gdelt", side_effect=_gdelt):
+                patch.object(news, "_gdelt", side_effect=_gdelt), \
+                patch.object(news, "_fetch", return_value=_ARTICLE_PAGE):
             return news.fetch_news("123456789", "EKSEMPEL AS")
 
     def test_dated_item_publishes(self):

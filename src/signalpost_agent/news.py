@@ -11,6 +11,17 @@ from a Norwegian outlet or mentions Norway. Name-only foreign hits abstain.
 Date discipline (v5): an item publishes only with a real, parseable
 publication date — a missing or unparseable stamp drops the item
 (``dropped.undated``), matching the company-site connector's rule.
+
+Page discipline (v8): the title/snippet gate alone let generic
+single-word name matches through (a company named FRITID AS matched
+articles about "fritid", the word for leisure). An external item now
+publishes only when its own article page — fetched with the same
+SSRF-safe fetcher — shows the company's full legal name (whole words,
+"AS" included) or its organisation number (``page_identity_proof``),
+and the published date is the date visible on that page, overriding
+the search-listing/feed stamp; an external item with no establishable
+on-page date is dropped. Item URLs are canonicalised (feed variants
+and trackers stripped) before dedupe and output.
 """
 from __future__ import annotations
 
@@ -24,7 +35,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from typing import Any
 
-from .entity_gate import _org_number_variants
+from .entity_gate import _org_number_variants, canonical_url, page_identity_proof
 
 USER_AGENT = "signalpost-agent/1.0 (+https://github.com/pintu544/signalpost)"
 TIMEOUT = 12
@@ -115,6 +126,97 @@ def _normalize_date(raw: str) -> str:
     except Exception:
         pass
     return raw
+
+
+_MONTHS_EN = {"january": 1, "february": 2, "march": 3, "april": 4,
+              "may": 5, "june": 6, "july": 7, "august": 8, "september": 9,
+              "october": 10, "november": 11, "december": 12}
+_EN_LONG_DATE_RE = re.compile(
+    r"(\d{1,2})\.?\s+(" + "|".join(_MONTHS_EN) + r")\s+(\d{4})", re.IGNORECASE)
+_EN_US_DATE_RE = re.compile(
+    r"(" + "|".join(_MONTHS_EN) + r")\s+(\d{1,2}),?\s+(\d{4})", re.IGNORECASE)
+
+
+def _find_date_any(text: str) -> datetime.date | None:
+    """First real date in a text: ISO / Norwegian forms (via jobs) plus
+    English long forms ('17 February 2026', 'February 17, 2026')."""
+    from .jobs import _find_date
+
+    found = _find_date(text or "")
+    if found:
+        return found
+    match = _EN_LONG_DATE_RE.search(text or "")
+    if match:
+        try:
+            return datetime.date(int(match.group(3)),
+                                 _MONTHS_EN[match.group(2).casefold()],
+                                 int(match.group(1)))
+        except ValueError:
+            return None
+    match = _EN_US_DATE_RE.search(text or "")
+    if match:
+        try:
+            return datetime.date(int(match.group(3)),
+                                 _MONTHS_EN[match.group(1).casefold()],
+                                 int(match.group(2)))
+        except ValueError:
+            return None
+    return None
+
+
+def _page_date(html_text: str, url: str, text: str) -> str:
+    """The publish date visible on the article page itself (v8).
+
+    Structured stamps first (JSON-LD / microdata / article:published_time
+    / <time datetime>, via the site connector's extractor), then a
+    labelled date ('Publisert …' / 'Published …'), then the first date
+    in the visible text. Returns an ISO stamp or "" — never a guess.
+    """
+    from .site_news import extract_site_article
+
+    item, _reason = extract_site_article(html_text, url)
+    if item and item.get("published"):
+        return item["published"]
+    label = re.search(r"(publisert|published)\b", text, re.IGNORECASE)
+    if label:
+        found = _find_date_any(text[label.end():label.end() + 64])
+        if found:
+            return found.strftime("%Y-%m-%dT%H:%M:%SZ")
+    found = _find_date_any(text)
+    if found:
+        return found.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return ""
+
+
+def _verify_external_item(item: dict[str, Any], org_number: str,
+                          legal_name: str) -> str:
+    """v8 page gate for external items.
+
+    Fetches the item's article page and publishes only when the page
+    itself proves the company (full legal name as whole words, or the
+    org number) and shows a publish date — which then overrides the
+    listing/feed stamp. Returns "" to publish, else the diagnostics
+    drop key: "unverifiable" (page unfetchable), "page_entity" (page
+    fetched, identity not proven), "undated" (identity proven, no
+    on-page date establishable).
+    """
+    raw = _fetch(item["url"])
+    if not raw:
+        return "unverifiable"
+    from .discover import visible_text
+
+    html_text = raw.decode("utf-8", errors="replace")
+    text = visible_text(html_text)
+    proof = page_identity_proof(org_number, legal_name, text)
+    if not proof:
+        return "page_entity"
+    published = _page_date(html_text, item["url"], text)
+    if not published:
+        return "undated"
+    item["page_gate"] = proof
+    item["published"] = published
+    item["date_source"] = "article_page"
+    return ""
 
 
 def _clean_title(title: str) -> str:
@@ -242,7 +344,8 @@ def fetch_news(org_number: str, legal_name: str, registry_domain: str = "",
     requests = 0
     diagnostics: dict[str, Any] = {
         "external": {"candidates": 0, "published": 0,
-                     "dropped": {"entity": 0, "undated": 0}},
+                     "dropped": {"entity": 0, "undated": 0,
+                                 "unverifiable": 0, "page_entity": 0}},
     }
 
     queries = [f'"{org_number}"', f'"{legal_name}" Norway']
@@ -267,9 +370,12 @@ def fetch_news(org_number: str, legal_name: str, registry_domain: str = "",
             for item in items:
                 diagnostics["external"]["candidates"] += 1
                 url = item.get("url") or ""
-                if not url or url in seen:
+                # v8: dedupe on the canonical URL from the start, so a
+                # feed variant of a story seen via another source is
+                # recognised as the same item.
+                if not url or canonical_url(url) in seen:
                     continue
-                seen.add(url)
+                seen.add(canonical_url(url))
                 exact, proof = _is_exact(org_number, legal_name, item, registry_domain)
                 if not exact:
                     diagnostics["external"]["dropped"]["entity"] += 1
@@ -303,11 +409,29 @@ def fetch_news(org_number: str, legal_name: str, registry_domain: str = "",
         resolved_items = list(pool.map(_resolve_item, candidates))
 
     for item in resolved_items:
-        # Dedupe post-resolution: two redirects may point to the same article.
+        # Dedupe post-resolution: two redirects may point to the same
+        # article. v8: the published URL is the canonical form.
+        item["url"] = canonical_url(item["url"])
         if item["url_resolved"] and item["url"] in seen:
             continue
         seen.add(item["url"])
         gated.append(item)
+
+    # v8 page gate: every surviving external candidate must prove itself
+    # on its own article page (identity + on-page date) before it may
+    # publish — see _verify_external_item.
+    def _verify(item: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        return item, _verify_external_item(item, org_number, legal_name)
+
+    requests += len(gated)  # one page fetch per candidate
+    verified: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for item, reason in pool.map(_verify, gated):
+            if reason:
+                diagnostics["external"]["dropped"][reason] += 1
+            else:
+                verified.append(item)
+    gated = verified
     diagnostics["external"]["published"] = len(gated)
 
     # T2.2b — the company's own website (v4): deepcrawl's news pages mined
@@ -321,9 +445,9 @@ def fetch_news(org_number: str, legal_name: str, registry_domain: str = "",
         requests += site["requests"]
         diagnostics["site"] = site["diagnostics"]
         for item in site["items"]:
-            if item["url"] in seen:
+            if canonical_url(item["url"]) in seen:
                 continue
-            seen.add(item["url"])
+            seen.add(canonical_url(item["url"]))
             gated.append(item)
 
     gated.sort(key=lambda i: i.get("published", ""), reverse=True)

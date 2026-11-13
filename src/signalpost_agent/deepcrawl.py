@@ -64,6 +64,45 @@ def _fetch_bytes(url: str) -> bytes | None:
         return None
 
 
+def _fetch_bytes_final(url: str) -> tuple[bytes, str] | None:
+    """_fetch_bytes variant that also returns the final URL after
+    redirects (v8 probe guard needs to see where a probe landed)."""
+    try:
+        import sys
+        import urllib.request
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from norway_company_agent.website import (  # noqa: E402
+            SAFE_OPENER,
+            USER_AGENT,
+            assert_public_url,
+        )
+
+        assert_public_url(url)
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with SAFE_OPENER.open(req, timeout=12) as resp:
+            if getattr(resp, "status", 200) != 200:
+                return None
+            return resp.read(1_000_000), resp.geturl()
+    except Exception:
+        return None
+
+
+def _redirected_away(requested: str, final: str) -> bool:
+    """True when a probe landed somewhere other than the requested URL:
+    a different page, or the homepage itself (v8 guard — many sites
+    200-redirect every unknown path to /, which would otherwise fake a
+    career/news section into existence)."""
+    def _norm(u: str) -> tuple[str, str, str]:
+        p = urlparse(u or "")
+        return ((p.scheme or "https").lower(), (p.hostname or "").lower(),
+                (p.path or "/").rstrip("/") or "/")
+
+    if _norm(final)[2] == "/":
+        return True
+    return _norm(final) != _norm(requested)
+
+
 def probe_section_urls(
     site_url: str,
     *,
@@ -79,8 +118,12 @@ def probe_section_urls(
     HTTP 200 and is fed to those connectors unchanged — their own
     entity and date gates still decide what publishes. First hit per
     section wins, so the cost is bounded by the path lists.
+
+    v8: a probe that REDIRECTS — to the homepage or to any other URL —
+    does not count; the section must exist at its own address. Injected
+    fetchers (test doubles) cannot report a final URL, so for them the
+    requested URL stands as the final one.
     """
-    fetch = fetcher or _fetch_bytes
     result: dict[str, Any] = {"career_urls": [], "news_urls": [], "requests": 0}
     parsed = urlparse(site_url or "")
     if not parsed.netloc:
@@ -93,9 +136,15 @@ def probe_section_urls(
         for path in paths:
             url = origin + path
             result["requests"] += 1
-            if fetch(url):
-                result[key].append(url)
-                break
+            if fetcher is not None:
+                body, final_url = fetcher(url), url
+            else:
+                fetched = _fetch_bytes_final(url)
+                body, final_url = fetched if fetched else (None, url)
+            if not body or _redirected_away(url, final_url):
+                continue
+            result[key].append(url)
+            break
     return result
 
 def _distinctive_name(legal_name: str) -> str:

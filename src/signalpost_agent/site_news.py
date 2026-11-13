@@ -19,6 +19,14 @@ Entity discipline: unchanged and strict — every URL must sit on the
 registry-verified domain (EXACT by domain proof via entity_gate), and
 the whole connector abstains when the site failed content verification
 (franchisor/provider trap, same rule as the jobs connector).
+
+v8: domain proof alone no longer publishes an item — the news (listing)
+page or the item's own page must also show the company's full legal
+name (whole words) or organisation number (``page_identity_proof``),
+feed-item dates are reconciled against the article page's own date
+(a Joomla feed stamp ran 2 days ahead of the page's publish date),
+and item URLs are canonicalised before dedupe/output so an RSS and an
+Atom spelling of one story publish once.
 """
 from __future__ import annotations
 
@@ -380,7 +388,13 @@ def fetch_site_news(
     proof. Abstains entirely without a verified domain or when the site
     failed content verification (franchisor trap).
     """
-    from .entity_gate import _domain_matches, assess_candidate
+    from .discover import visible_text
+    from .entity_gate import (
+        _domain_matches,
+        assess_candidate,
+        canonical_url,
+        page_identity_proof,
+    )
 
     started = time.monotonic()
     fetch = fetcher or _fetch_bytes
@@ -388,7 +402,7 @@ def fetch_site_news(
         "candidates": 0, "published": 0,
         "dropped": {"entity": 0, "modified_only": 0, "undated": 0,
                     "nav_label": 0, "product_page": 0, "no_title": 0,
-                    "fetch_failed": 0, "duplicate": 0},
+                    "fetch_failed": 0, "duplicate": 0, "identity": 0},
         "feeds": 0, "sitemaps": 0, "listing_pages": 0,
     }
     result: dict[str, Any] = {"items": [], "requests": 0,
@@ -406,6 +420,9 @@ def fetch_site_news(
     seen_urls: set[str] = set()
 
     def _accept(item: dict[str, Any], proof: str) -> None:
+        # v8: canonicalise before dedupe/output — an RSS and an Atom
+        # spelling of the same story must publish exactly once.
+        item["url"] = canonical_url(item["url"])
         if item["url"] in seen_urls:
             diagnostics["dropped"]["duplicate"] += 1
             return
@@ -426,6 +443,10 @@ def fetch_site_news(
         seed_pages.append(site_url)
     candidate_urls: list[str] = []
     feed_urls: list[str] = []
+    # v8: identity evidence from the news/listing pages themselves —
+    # an item may publish when its own page OR the news page it came
+    # from shows the full legal name or the org number.
+    listing_proof = ""
     for page_url in seed_pages:
         if assess_candidate(org_number, legal_name, registry_domain, page_url)["verdict"] != "exact":
             diagnostics["dropped"]["entity"] += 1
@@ -437,6 +458,9 @@ def fetch_site_news(
             continue
         diagnostics["listing_pages"] += 1
         html_text = raw.decode("utf-8", errors="replace")
+        if not listing_proof:
+            listing_proof = page_identity_proof(
+                org_number, legal_name, visible_text(html_text))
         for link in extract_post_links(html_text, page_url):
             if link not in candidate_urls:
                 candidate_urls.append(link)
@@ -477,6 +501,14 @@ def fetch_site_news(
             depth += 1
 
     # 3. Feeds: items arrive with their own publish dates.
+    # v8: each feed item's article page is fetched (bounded) to prove
+    # identity on the item's own page and to reconcile the date — the
+    # page's date overrides the feed stamp when they disagree. When
+    # the page cannot be fetched, the listing-page proof is the only
+    # identity basis and the feed date stands.
+    from .news import _page_date
+
+    feed_page_fetches = 0
     for feed_url in feed_urls[:MAX_FEEDS]:
         raw = fetch(feed_url)
         requests += 1
@@ -491,6 +523,23 @@ def fetch_site_news(
             diagnostics["candidates"] += 1
             if not _domain_matches(item["url"], registry_domain):
                 diagnostics["dropped"]["entity"] += 1
+                continue
+            own_proof = ""
+            if feed_page_fetches < MAX_ARTICLES_FETCHED:
+                feed_page_fetches += 1
+                requests += 1
+                page_raw = fetch(item["url"])
+                if page_raw:
+                    page_html = page_raw.decode("utf-8", errors="replace")
+                    page_text = visible_text(page_html)
+                    own_proof = page_identity_proof(
+                        org_number, legal_name, page_text)
+                    page_date = _page_date(page_html, item["url"], page_text)
+                    if page_date:
+                        item["published"] = page_date
+                        item["date_source"] = "article_page"
+            if not (own_proof or listing_proof):
+                diagnostics["dropped"]["identity"] += 1
                 continue
             _accept(item, f"registry_domain:{registry_domain}")
 
@@ -507,7 +556,16 @@ def fetch_site_news(
         raw = fetch(url)
         if not raw:
             return url, None, "fetch_failed"
-        item, reason = extract_site_article(raw.decode("utf-8", errors="replace"), url)
+        html_text = raw.decode("utf-8", errors="replace")
+        item, reason = extract_site_article(html_text, url)
+        if item is None:
+            return url, None, reason
+        # v8: the item's own page (or the news page it was found on)
+        # must show the full legal name or the org number.
+        own_proof = page_identity_proof(
+            org_number, legal_name, visible_text(html_text))
+        if not (own_proof or listing_proof):
+            return url, None, "identity"
         return url, item, reason
 
     if todo:

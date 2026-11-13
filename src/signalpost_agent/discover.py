@@ -47,6 +47,7 @@ from typing import Any, Callable
 from .entity_gate import (
     _registered_domain,
     distinctive_name,
+    full_legal_name_pattern,
     name_collision_risk,
     org_number_pattern,
 )
@@ -205,18 +206,23 @@ def verify_site_content(org_number: str, legal_name: str, text: str) -> str:
 
     Returns "organisation_number" when the org number (any spaced/dashed
     variant, digit-boundary-anchored) appears in the crawled text;
-    "legal_name" when the full distinctive legal name appears AND the
-    page is not a namesake/directory collision (other org numbers
-    present, ours absent — the org branch above already excluded that);
-    "" otherwise.
+    "legal_name" when the FULL legal name — legal-form suffix included,
+    as whole words — appears AND the page is not a namesake/directory
+    collision (other org numbers present, ours absent — the org branch
+    above already excluded that); "" otherwise.
+
+    v8: the name branch used to accept the bare distinctive name as a
+    substring, so a single generic word (e.g. "Fritid", the ordinary
+    word for *leisure*) proved a whole website. The standard is now the
+    same one the external-news gate uses: full legal name or org number.
     """
     if not text:
         return ""
     pattern = org_number_pattern(org_number)
     if pattern and pattern.search(text):
         return "organisation_number"
-    distinctive = distinctive_name(legal_name)
-    if len(distinctive) >= 4 and distinctive.casefold() in text.casefold():
+    name_re = full_legal_name_pattern(legal_name)
+    if name_re and name_re.search(text):
         if name_collision_risk(legal_name, text):
             return ""
         return "legal_name"
