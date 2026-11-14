@@ -205,3 +205,24 @@ class KeylessDiscoveryTests(unittest.TestCase):
         pages = {"http://fyrifish.no/": "Fyri Fish AS"}
         r = self._run("FYRI FISH AS", "928994058", pages, resolvable={"fyrifish.no"})
         self.assertTrue(r["found"])
+
+
+class PlaceholderAndSearchFilterTests(unittest.TestCase):
+    def test_hello_world_is_placeholder(self):
+        from signalpost_agent.site_news import is_placeholder_post
+        self.assertTrue(is_placeholder_post("Hello world!", "https://www.fyrifish.no/hello-world"))
+        self.assertTrue(is_placeholder_post("Velkommen", "https://x.no/hei-verden/"))
+        self.assertFalse(is_placeholder_post("Ny båt levert", "https://x.no/nyheter/ny-bat"))
+
+    def test_unrelated_search_domains_are_not_crawled(self):
+        crawled = []
+
+        def crawl(url):
+            crawled.append(url)
+            return {"status": "not_found", "value": None}, {"requests": 1}
+
+        discover_website(
+            "916862261", "STEINLY HYDRAULIKK AS", "TROMSØ",
+            searcher=lambda q: (["https://www.zhihu.com/q/1", "https://steinly.no/kontakt"], "bing"),
+            crawler=crawl, fetcher=lambda u: None, resolver=lambda d: False)
+        self.assertEqual(crawled, ["https://steinly.no/"])

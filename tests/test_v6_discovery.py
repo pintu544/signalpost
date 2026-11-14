@@ -73,7 +73,7 @@ class DiscoveryGateTests(unittest.TestCase):
                               "OTHER FIRMA AS — organisasjonsnummer 987 654 321.")
         result = discover_website(
             ORG, NAME, "Oslo",
-            searcher=lambda q: (["https://other-firma.no/"], "fake"),
+            searcher=lambda q: (["https://acme-other.no/"], "fake"),
             crawler=_crawler_returning(record))
         self.assertFalse(result["found"])
         self.assertEqual(result["rejected"][0]["reason"], "content_gate_failed")
@@ -91,7 +91,7 @@ class DiscoveryGateTests(unittest.TestCase):
         dead = {"field": "website", "status": "not_found", "value": None}
         result = discover_website(
             ORG, NAME, "Oslo",
-            searcher=lambda q: (["https://dead-site.no/"], "fake"),
+            searcher=lambda q: (["https://acme-dead.no/"], "fake"),
             crawler=_crawler_returning(dead))
         self.assertFalse(result["found"])
         self.assertEqual(result["rejected"][0]["reason"], "not_found")

@@ -70,6 +70,21 @@ def _is_nav_label(text: str) -> bool:
     return norm in _NAV_EXACT or bool(_NAV_RE.match(norm))
 
 
+_PLACEHOLDER_TITLES = {
+    "hello world!", "hello world", "hei verden!", "hei verden", "hallo verden!",
+    "hallo verden", "sample page", "eksempelside", "test", "testinnlegg",
+    "uncategorized", "ukategorisert",
+}
+_PLACEHOLDER_SLUGS = ("/hello-world", "/hei-verden", "/hallo-verden", "/sample-page")
+
+
+def is_placeholder_post(title: str, url: str) -> bool:
+    """CMS default posts (WordPress "Hello world!") are not company news."""
+    norm = re.sub(r"\s+", " ", (title or "").strip().casefold())
+    path = urllib.parse.urlparse(url or "").path.casefold().rstrip("/")
+    return norm in _PLACEHOLDER_TITLES or path.endswith(_PLACEHOLDER_SLUGS)
+
+
 def _iso_date(raw: Any) -> str:
     """Normalize a publish date to ISO 8601 UTC; "" when unparseable.
 
@@ -444,6 +459,10 @@ def fetch_site_news(
     seen_urls: set[str] = set()
 
     def _accept(item: dict[str, Any], proof: str) -> None:
+        if is_placeholder_post(item.get("title", ""), item.get("url", "")):
+            diagnostics["dropped"]["placeholder"] = \
+                diagnostics["dropped"].get("placeholder", 0) + 1
+            return
         # v8: canonicalise before dedupe/output — an RSS and an Atom
         # spelling of the same story must publish exactly once.
         item["url"] = canonical_url(item["url"])

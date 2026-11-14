@@ -489,12 +489,13 @@ def discover_website(
             except Exception:
                 urls = []
             requests += 1
-            homepages = [h for h in candidate_homepages(urls) if h not in seen_homepages]
+            # v9: only domains that echo the company name. Unwrapped Bing
+            # results for bot traffic were unrelated sites; crawling them
+            # costs time and adds false-match risk for no gain.
+            homepages = [h for h in candidate_homepages(urls)
+                         if h not in seen_homepages
+                         and _domain_echoes_name(h, distinctive)]
             kinds = {h: "search" for h in homepages}
-            # stable sort: name-echoing domains first, search rank
-            # preserved within each group (directories rank high in raw
-            # results and would otherwise burn the candidate budget)
-            homepages.sort(key=lambda h: 0 if _domain_echoes_name(h, distinctive) else 1)
         seen_homepages.update(homepages)
         for homepage in homepages:
             if len(tried) >= max_candidates:
