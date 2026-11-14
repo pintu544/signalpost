@@ -305,13 +305,26 @@ def extract_site_article(html_text: str, url: str) -> tuple[dict[str, Any] | Non
     nodes: list[dict[str, Any]] = []
     for block in metadata.get("json-ld", []) or []:
         _walk_jsonld(block, nodes)
-    micro_items = (metadata.get("microdata") or {}).get("items", []) or []
-    for micro in micro_items:
-        if isinstance(micro, dict):
-            node = {"@type": [t.rsplit("/", 1)[-1] for t in micro.get("type", []) or []],
-                    **{k: (v[0] if isinstance(v, list) and v else v)
-                       for k, v in (micro.get("properties") or {}).items()}}
-            nodes.append(node)
+    # extruct returns microdata as a LIST of items (older versions: a
+    # dict with "items"); accept both and never let odd shapes raise.
+    raw_micro = metadata.get("microdata") or []
+    if isinstance(raw_micro, dict):
+        raw_micro = raw_micro.get("items", []) or []
+    for micro in raw_micro if isinstance(raw_micro, list) else []:
+        if not isinstance(micro, dict):
+            continue
+        try:
+            mtype = micro.get("type", []) or []
+            if isinstance(mtype, str):
+                mtype = [mtype]
+            props = micro.get("properties") or {}
+            if not isinstance(props, dict):
+                props = {}
+            nodes.append({"@type": [str(t).rsplit("/", 1)[-1] for t in mtype],
+                          **{k: (v[0] if isinstance(v, list) and v else v)
+                             for k, v in props.items()}})
+        except Exception:
+            continue
 
     published = ""
     modified_seen = False
@@ -338,15 +351,26 @@ def extract_site_article(html_text: str, url: str) -> tuple[dict[str, Any] | Non
     if not published:
         for time_el in soup.find_all("time"):
             stamp = time_el.get("datetime") or time_el.get("content")
-            props = (time_el.get("itemprop") or "")
+            props = str(time_el.get("itemprop") or "")
+            classes = " ".join(time_el.get("class") or []).casefold()
+            if ("dateModified" in props or re.search(r"modif|updated|endret", classes)):
+                modified_seen = True
+                continue
             if stamp and ("datePublished" in props or time_el.find_parent("article")
                           or soup.find("h1")):
                 candidate = _iso_date(stamp)
                 if candidate:
                     published = candidate
                     break
-            if "dateModified" in props:
-                modified_seen = True
+    if not published:
+        # An explicitly labelled date ("Publisert ..." / "Published ...")
+        # on the page itself. Unlabelled body dates never count.
+        from .discover import visible_text
+        from .news import labelled_publish_date
+
+        labelled = labelled_publish_date(visible_text(html_text))
+        if labelled:
+            published = labelled
     if not published:
         return None, "modified_only" if modified_seen else "undated"
 
@@ -443,10 +467,6 @@ def fetch_site_news(
         seed_pages.append(site_url)
     candidate_urls: list[str] = []
     feed_urls: list[str] = []
-    # v8: identity evidence from the news/listing pages themselves —
-    # an item may publish when its own page OR the news page it came
-    # from shows the full legal name or the org number.
-    listing_proof = ""
     for page_url in seed_pages:
         if assess_candidate(org_number, legal_name, registry_domain, page_url)["verdict"] != "exact":
             diagnostics["dropped"]["entity"] += 1
@@ -458,9 +478,6 @@ def fetch_site_news(
             continue
         diagnostics["listing_pages"] += 1
         html_text = raw.decode("utf-8", errors="replace")
-        if not listing_proof:
-            listing_proof = page_identity_proof(
-                org_number, legal_name, visible_text(html_text))
         for link in extract_post_links(html_text, page_url):
             if link not in candidate_urls:
                 candidate_urls.append(link)
@@ -524,23 +541,29 @@ def fetch_site_news(
             if not _domain_matches(item["url"], registry_domain):
                 diagnostics["dropped"]["entity"] += 1
                 continue
-            own_proof = ""
-            if feed_page_fetches < MAX_ARTICLES_FETCHED:
-                feed_page_fetches += 1
-                requests += 1
-                page_raw = fetch(item["url"])
-                if page_raw:
-                    page_html = page_raw.decode("utf-8", errors="replace")
-                    page_text = visible_text(page_html)
-                    own_proof = page_identity_proof(
-                        org_number, legal_name, page_text)
-                    page_date = _page_date(page_html, item["url"], page_text)
-                    if page_date:
-                        item["published"] = page_date
-                        item["date_source"] = "article_page"
-            if not (own_proof or listing_proof):
+            # v9: the item's OWN page must prove identity and carry the
+            # publication date. A feed stamp or a listing page is never
+            # evidence; an unfetchable page means no item.
+            if feed_page_fetches >= MAX_ARTICLES_FETCHED:
                 diagnostics["dropped"]["identity"] += 1
                 continue
+            feed_page_fetches += 1
+            requests += 1
+            page_raw = fetch(item["url"])
+            if not page_raw:
+                diagnostics["dropped"]["fetch_failed"] += 1
+                continue
+            page_html = page_raw.decode("utf-8", errors="replace")
+            page_text = visible_text(page_html)
+            if not page_identity_proof(org_number, legal_name, page_text):
+                diagnostics["dropped"]["identity"] += 1
+                continue
+            page_date = _page_date(page_html, item["url"], page_text)
+            if not page_date:
+                diagnostics["dropped"]["undated"] += 1
+                continue
+            item["published"] = page_date
+            item["date_source"] = "article_page"
             _accept(item, f"registry_domain:{registry_domain}")
 
     # 4. Article pages: fetch and demand a real publish date.
@@ -557,15 +580,18 @@ def fetch_site_news(
         if not raw:
             return url, None, "fetch_failed"
         html_text = raw.decode("utf-8", errors="replace")
-        item, reason = extract_site_article(html_text, url)
+        try:
+            item, reason = extract_site_article(html_text, url)
+        except Exception:
+            return url, None, "undated"
         if item is None:
             return url, None, reason
         # v8: the item's own page (or the news page it was found on)
         # must show the full legal name or the org number.
-        own_proof = page_identity_proof(
-            org_number, legal_name, visible_text(html_text))
-        if not (own_proof or listing_proof):
+        if not page_identity_proof(
+                org_number, legal_name, visible_text(html_text)):
             return url, None, "identity"
+        item["date_source"] = "article_page"
         return url, item, reason
 
     if todo:

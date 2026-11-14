@@ -78,6 +78,10 @@ def _opener_for(mapping):
 
 
 def _run(career_urls, mapping):
+    # v9: a posting with its own URL is verified against its own page.
+    mapping = {"https://example.no/stillinger/123":
+               b"<html><body><h1>Backend-utvikler</h1><p>Vi s\xc3\xb8ker deg.</p></body></html>",
+               **mapping}
     website_mod = MagicMock()
     website_mod.SAFE_OPENER = _opener_for(mapping)
     website_mod.USER_AGENT = "test"

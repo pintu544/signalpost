@@ -48,6 +48,7 @@ from .entity_gate import (
     _registered_domain,
     distinctive_name,
     full_legal_name_pattern,
+    has_standalone_name,
     name_collision_risk,
     org_number_pattern,
 )
@@ -149,12 +150,38 @@ def _bing_urls(raw: bytes) -> list[str]:
         soup = BeautifulSoup(raw.decode("utf-8", "replace"), "lxml")
         urls: list[str] = []
         for anchor in soup.select("li.b_algo h2 a"):
-            href = str(anchor.get("href") or "")
+            href = unwrap_bing_url(str(anchor.get("href") or ""))
             if href.startswith("http"):
                 urls.append(href)
         return urls
     except Exception:
         return []
+
+
+def unwrap_bing_url(href: str) -> str:
+    """Resolve a Bing ``/ck/a?...&u=a1<base64url>`` click-tracking link.
+
+    Bing wraps every organic result; the real target is the ``u``
+    parameter: the two-character prefix ``a1`` followed by URL-safe
+    base64 without padding. Non-wrapped links are returned unchanged;
+    a wrapper that cannot be decoded returns "" (never the wrapper
+    itself, which would be a bing.com URL).
+    """
+    parsed = urllib.parse.urlparse(href)
+    host = (parsed.hostname or "").lower()
+    if not (host.endswith("bing.com") and parsed.path.startswith("/ck/")):
+        return href
+    values = urllib.parse.parse_qs(parsed.query).get("u", [])
+    if not values or len(values[0]) < 3:
+        return ""
+    payload = values[0][2:]
+    try:
+        import base64
+        target = base64.urlsafe_b64decode(
+            payload + "=" * (-len(payload) % 4)).decode("utf-8")
+    except Exception:
+        return ""
+    return target if target.startswith(("http://", "https://")) else ""
 
 
 def search_web(query: str, fetcher: Callable[[str], bytes | None] | None = None) -> tuple[list[str], str]:
@@ -221,8 +248,7 @@ def verify_site_content(org_number: str, legal_name: str, text: str) -> str:
     pattern = org_number_pattern(org_number)
     if pattern and pattern.search(text):
         return "organisation_number"
-    name_re = full_legal_name_pattern(legal_name)
-    if name_re and name_re.search(text):
+    if has_standalone_name(legal_name, text):
         if name_collision_risk(legal_name, text):
             return ""
         return "legal_name"

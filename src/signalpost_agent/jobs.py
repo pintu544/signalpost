@@ -145,6 +145,43 @@ def _application_deadline(text: str) -> datetime.date | None:
     return _find_date(text[match.end():match.end() + 48])
 
 
+_CLOSED_RE = re.compile(
+    r"stillingen\s+er\s+(?:besatt|fylt|utl[øo]pt|stengt)"
+    r"|stilling(?:en)?\s+(?:er\s+)?(?:besatt|fylt)"
+    r"|s[øo]knadsfristen?\s+(?:er\s+)?(?:ute|utl[øo]pt|passert|gått\s+ut)"
+    r"|ikke\s+lenger\s+(?:ledig|aktuell|tilgjengelig)"
+    r"|stengt\s+for\s+s[øo]knader|utlysningen\s+er\s+avsluttet"
+    r"|(?:position|job|vacancy|role|posting)\s+(?:has\s+been\s+|is\s+now\s+|is\s+)?"
+    r"(?:filled|closed|expired|no\s+longer\s+available)"
+    r"|no\s+longer\s+accepting\s+applications|applications?\s+(?:are\s+)?closed"
+    r"|this\s+(?:job|position|vacancy)\s+(?:is\s+)?(?:closed|expired)",
+    re.IGNORECASE)
+
+
+def posting_is_closed(text: str) -> bool:
+    """True when posting-page text says the position is filled/closed."""
+    return bool(_CLOSED_RE.search(text or ""))
+
+
+def _fetch_posting_page(url: str) -> str | None:
+    """Fetch one posting page through the SSRF-safe opener; None on failure."""
+    import urllib.request
+
+    from norway_company_agent.website import (
+        SAFE_OPENER,
+        USER_AGENT,
+        assert_public_url,
+    )
+
+    try:
+        assert_public_url(url)
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with SAFE_OPENER.open(req, timeout=12) as resp:
+            return resp.read(1_000_000).decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+
 def _visible_date(text: str, soup: Any) -> datetime.date | None:
     """A publish date visibly stated on a posting page, else None.
 
@@ -189,6 +226,8 @@ def _job_from_posting_page(html_text: str, url: str, org_number: str,
         return None, "no_entity_proof"
     deadline = _application_deadline(text)
     if deadline is not None and deadline < today:
+        return None, "closed"
+    if posting_is_closed(text):
         return None, "closed"
     soup = BeautifulSoup(html_text, "lxml")
     title = ""
@@ -343,6 +382,21 @@ def extract_jobs_from_career_pages(
                 key = (title + hiring_name + own_url).casefold()
                 if key in seen:
                     continue
+                # v9: a posting with its own URL is verified against its
+                # own page: fetchable, and not marked filled/closed.
+                if own_url:
+                    own_html = _fetch_posting_page(own_url)
+                    requests += 1
+                    if own_html is None:
+                        dropped["unverifiable"] = dropped.get("unverifiable", 0) + 1
+                        continue
+                    from .discover import visible_text
+                    own_text = visible_text(own_html)
+                    own_deadline = _application_deadline(own_text)
+                    if posting_is_closed(own_text) or (
+                            own_deadline is not None and own_deadline < today):
+                        dropped["closed"] = dropped.get("closed", 0) + 1
+                        continue
                 seen.add(key)
                 jobs.append({
                     "title": title[:200],

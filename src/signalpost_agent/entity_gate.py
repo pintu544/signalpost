@@ -126,6 +126,52 @@ def full_legal_name_pattern(legal_name: str) -> "re.Pattern[str] | None":
     return re.compile(rf"(?<!\w){re.escape(name)}(?!\w)", re.IGNORECASE)
 
 
+# Words that may directly precede a company name without being part of
+# it ("Kontakt FRITID AS", "© Fritid AS").
+_NAME_LEADERS = {
+    "kontakt", "om", "velkommen", "copyright", "besøk", "besok", "hos", "fra",
+    "til", "org", "navn", "firma", "selskap", "eier", "drevet", "av", "og",
+    "welcome", "contact", "about", "by", "at", "for", "med", "i", "på",
+}
+_JOINERS = {"og", "&", "and", "+", "&amp;"}
+
+
+def has_standalone_name(legal_name: str, text: str) -> bool:
+    """True when the FULL legal name occurs at least once as its own name.
+
+    v9: an occurrence embedded in a longer name ("Tellus Caravan og
+    Fritid AS" contains "Fritid AS") is not the company. An occurrence
+    is embedded when the word before it is a joiner
+    ("og", "&", "and", "+"). Residual risk: a longer name with no joiner
+    ("Nordic Fritid AS") is not detected; the org number is the only
+    airtight proof.
+    """
+    pattern = full_legal_name_pattern(legal_name)
+    if not pattern or not text:
+        return False
+    for match in pattern.finditer(text):
+        before = text[:match.start()].split()
+        prev = before[-1] if before else ""
+        prev_clean = prev.strip("©:;,.()\"'«»")
+        low = prev_clean.casefold()
+        if prev in _JOINERS or low in _JOINERS:
+            continue
+        if not prev_clean:
+            return True
+        if prev in _JOINERS or low in _JOINERS:
+            # joined to another name ("X og FRITID AS"), unless it is a
+            # plain sentence like "Alle i Oslo og FRITID AS" - treated
+            # as embedded; the org number still proves identity.
+            continue
+        if low in _NAME_LEADERS:
+            return True
+        # Any other preceding word: text from separate page elements is
+        # joined with spaces, so a capitalised neighbour ("Sveiser
+        # FRITID AS") is usually a heading, not part of the name.
+        return True
+    return False
+
+
 def page_identity_proof(org_number: str, legal_name: str, text: str) -> str:
     """Strict page-level identity proof: "org_number" | "legal_name" | "".
 
@@ -139,8 +185,7 @@ def page_identity_proof(org_number: str, legal_name: str, text: str) -> str:
     pattern = org_number_pattern(org_number)
     if pattern and pattern.search(text):
         return "org_number"
-    name_re = full_legal_name_pattern(legal_name)
-    if name_re and name_re.search(text):
+    if has_standalone_name(legal_name, text):
         if name_collision_risk(legal_name, text):
             return ""
         return "legal_name"

@@ -174,17 +174,33 @@ def _page_date(html_text: str, url: str, text: str) -> str:
     """
     from .site_news import extract_site_article
 
-    item, _reason = extract_site_article(html_text, url)
+    try:
+        item, _reason = extract_site_article(html_text, url)
+    except Exception:
+        item = None
     if item and item.get("published"):
         return item["published"]
-    label = re.search(r"(publisert|published)\b", text, re.IGNORECASE)
-    if label:
-        found = _find_date_any(text[label.end():label.end() + 64])
-        if found:
-            return found.strftime("%Y-%m-%dT%H:%M:%SZ")
-    found = _find_date_any(text)
-    if found:
-        return found.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # v9: labelled dates only. An unlabelled date in the body is never
+    # a publication date.
+    return labelled_publish_date(text)
+
+
+def labelled_publish_date(text: str) -> str:
+    """ISO stamp of a date explicitly labelled "Published"/"Publisert".
+
+    The date must follow the label within a few characters (a colon,
+    "den" or "on" may sit between). "" when there is none.
+    """
+    for label in re.finditer(r"\b(publisert|published)\b", text or "", re.IGNORECASE):
+        window = text[label.end():label.end() + 40]
+        match = re.match(r"\s*[:\-–]?\s*(?:den|on|date)?\s*[:\-–]?\s*", window, re.IGNORECASE)
+        rest = window[match.end():] if match else window
+        # the date must START the text after the label, not float in it
+        found = _find_date_any(rest[:24])
+        if found and _find_date_any(rest[:24]) is not None:
+            probe = rest[:24]
+            if re.match(r"\d{4}-\d{2}-\d{2}|\d{1,2}[.\s]|[A-Za-z]+\s+\d{1,2}", probe):
+                return found.strftime("%Y-%m-%dT%H:%M:%SZ")
     return ""
 
 
