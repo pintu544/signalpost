@@ -128,3 +128,80 @@ class ClosedPostingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from signalpost_agent.discover import (  # noqa: E402
+    discover_website,
+    name_domain_guesses,
+    registry_email_domain,
+)
+
+
+def _crawler_for(pages):
+    def crawl(url):
+        text = pages.get(url)
+        if text is None:
+            return {"status": "source_error", "value": None}, {"requests": 1}
+        final = url
+        if isinstance(text, tuple):
+            final, text = text
+        return ({"status": "available",
+                 "value": {"final_url": final, "main_text_excerpt": text,
+                           "registered_domain": final.split("/")[2].removeprefix("www.")}},
+                {"requests": 1})
+    return crawl
+
+
+class KeylessDiscoveryTests(unittest.TestCase):
+    def test_email_domain(self):
+        self.assertEqual(registry_email_domain("post@steinly.no"), "steinly.no")
+        self.assertEqual(registry_email_domain("fritid.as@gmail.com"), "")
+        self.assertEqual(registry_email_domain("x@proff.no"), "")
+        self.assertEqual(registry_email_domain("nonsense"), "")
+
+    def test_name_guesses(self):
+        self.assertEqual(name_domain_guesses("HADELAND REGNSKAPSSERVICE AS"),
+                         ["hadelandregnskapsservice.no", "hadeland-regnskapsservice.no"])
+        self.assertIn("okernprosjekt.no", name_domain_guesses("ØKERN PROSJEKT AS"))
+        self.assertEqual(name_domain_guesses("KIRKEGATA 53 LILLEHAMMER AS"), [])
+
+    def _run(self, name, org, pages, email="", resolvable=()):
+        return discover_website(
+            org, name, "", registry_email=email,
+            searcher=lambda q: ([], ""), crawler=_crawler_for(pages),
+            fetcher=lambda u: None, resolver=lambda d: d in resolvable)
+
+    def test_name_guess_verified_by_full_name(self):
+        r = self._run("FYRI FISH AS", "928994058",
+                      {"https://fyrifish.no/": "Fyri Fish AS - fisk fra Evje"},
+                      resolvable={"fyrifish.no"})
+        self.assertTrue(r["found"])
+        self.assertEqual(r["candidate_source"], "name_guess")
+
+    def test_single_word_guess_needs_org_number(self):
+        r = self._run("FRITID AS", "990869189",
+                      {"https://fritid.no/": "Velkommen til Fritid AS"},
+                      resolvable={"fritid.no"})
+        self.assertFalse(r["found"])
+        r = self._run("FRITID AS", "990869189",
+                      {"https://fritid.no/": "Fritid AS org.nr 990 869 189"},
+                      resolvable={"fritid.no"})
+        self.assertTrue(r["found"])
+
+    def test_owner_email_domain_needs_org_number(self):
+        pages = {"https://proxima.com/": "Prosjekter: Marker Vindpark AS"}
+        r = self._run("MARKER VINDPARK AS", "915592163", pages, email="tn@proxima.com")
+        self.assertFalse(r["found"])
+        pages = {"https://proxima.com/": "Marker Vindpark AS (org 915 592 163)"}
+        r = self._run("MARKER VINDPARK AS", "915592163", pages, email="tn@proxima.com")
+        self.assertTrue(r["found"])
+
+    def test_redirect_to_other_domain_needs_org_number(self):
+        pages = {"https://runarkvant.no/": ("https://kvant.no/", "Runar Kvant AS")}
+        r = self._run("RUNAR KVANT AS", "936645410", pages, email="post@runarkvant.no")
+        self.assertFalse(r["found"])
+
+    def test_http_fallback(self):
+        pages = {"http://fyrifish.no/": "Fyri Fish AS"}
+        r = self._run("FYRI FISH AS", "928994058", pages, resolvable={"fyrifish.no"})
+        self.assertTrue(r["found"])

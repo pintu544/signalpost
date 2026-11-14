@@ -50,8 +50,10 @@ def enrich_recall(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, in
     site_url = website_value.get("final_url", "")
     discovery: dict[str, Any] = {}
     if not site_domain:
+        registry_value = ((profile.get("evidence") or {}).get("registry") or {}).get("value") or {}
         discovery = discover_website(org, legal_name,
-                                     str(profile.get("municipality") or ""))
+                                     str(profile.get("municipality") or ""),
+                                     registry_email=str(registry_value.get("epostadresse") or ""))
         requests += discovery.get("requests", 0)
         if discovery.get("found"):
             site_source = "search"

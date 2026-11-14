@@ -354,6 +354,74 @@ def social_links_from_value(value: Any) -> list[dict[str, str]]:
     return sorted(found.values(), key=lambda i: (i["platform"], i["url"]))
 
 
+FREEMAIL_DOMAINS = {
+    "gmail.com", "googlemail.com", "hotmail.com", "hotmail.no", "outlook.com",
+    "live.com", "live.no", "msn.com", "yahoo.com", "yahoo.no", "icloud.com",
+    "me.com", "online.no", "frisurf.no", "start.no", "broadpark.no",
+    "getmail.no", "c2i.net", "telia.com", "altibox.no", "lyse.net",
+    "proton.me", "protonmail.com", "aol.com", "mail.com", "gmx.com",
+    "tele2.no", "chello.no", "bluezone.no", "ebnett.no",
+}
+
+
+def registry_email_domain(email: str) -> str:
+    """Registrable domain of the registry e-mail, "" for freemail/blocked."""
+    email = (email or "").strip().lower()
+    if "@" not in email:
+        return ""
+    host = email.rsplit("@", 1)[1].strip(". ")
+    if not re.fullmatch(r"[a-z0-9æøå.-]+\.[a-z]{2,}", host):
+        return ""
+    domain = _registered_domain(f"https://{host}/").lower()
+    if not domain or domain in FREEMAIL_DOMAINS or domain in BLOCKED_DOMAINS:
+        return ""
+    return domain
+
+
+_NAME_STOPWORDS = {"OG", "AND", "&", "I", "PÅ", "AV", "THE"}
+
+
+def name_domain_guesses(legal_name: str, limit: int = 4) -> list[str]:
+    """.no domains spelled from the distinctive name (keyless discovery).
+
+    "HADELAND REGNSKAPSSERVICE AS" -> hadelandregnskapsservice.no,
+    hadeland-regnskapsservice.no. Every guess must still pass the
+    content gate; a guess is only a place to look. Single-word names
+    (generic words like "fritid") need the org number on the site.
+    """
+    distinctive = distinctive_name(legal_name)
+    tokens = [t for t in re.split(r"[^\wæøåÆØÅ]+", distinctive.upper())
+              if t and t not in _NAME_STOPWORDS]
+    if not tokens or any(t.isdigit() for t in tokens):
+        return []
+
+    def ascii_fold(s: str) -> list[str]:
+        s = s.casefold()
+        forms = [s.replace("æ", "ae").replace("ø", "o").replace("å", "aa"),
+                 s.replace("æ", "ae").replace("ø", "o").replace("å", "a")]
+        return list(dict.fromkeys(forms))
+
+    guesses: list[str] = []
+    for joiner in ("", "-"):
+        if joiner and len(tokens) == 1:
+            continue
+        for form in ascii_fold(joiner.join(tokens)):
+            if 4 <= len(form.replace("-", "")) <= 40:
+                guesses.append(f"{form}.no")
+    return list(dict.fromkeys(guesses))[:limit]
+
+
+def _resolves(domain: str) -> bool:
+    """Cheap DNS check before crawling a guessed domain."""
+    import socket
+
+    try:
+        socket.getaddrinfo(domain, 443, proto=socket.IPPROTO_TCP)
+        return True
+    except Exception:
+        return False
+
+
 def discover_website(
     org_number: str,
     legal_name: str,
@@ -363,6 +431,8 @@ def discover_website(
     crawler: Callable[[str], tuple[dict[str, Any], dict[str, Any]]] | None = None,
     fetcher: Callable[[str], bytes | None] | None = None,
     max_candidates: int = MAX_CANDIDATES,
+    registry_email: str = "",
+    resolver: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
     """Search for the company's own website and content-verify a candidate.
 
@@ -390,18 +460,42 @@ def discover_website(
     tried: list[str] = []
     seen_homepages: set[str] = set()
     rejected: list[dict[str, str]] = []
-    for query in queries:
-        try:
-            urls, _source = search(query)
-        except Exception:
-            urls = []
-        requests += 1
-        homepages = [h for h in candidate_homepages(urls) if h not in seen_homepages]
+    # v9: keyless candidates that need no search engine, tried first.
+    # Search engines answered bots with junk or blocks in the v8 audit.
+    # (a) the registry e-mail domain, (b) domains built from the name.
+    # Both pass the same content gate; an e-mail domain that does not
+    # echo the name must show the ORG NUMBER (owner/accountant trap).
+    direct: list[tuple[str, str]] = []
+    email_domain = registry_email_domain(registry_email)
+    if email_domain:
+        direct.append((f"https://{email_domain}/", "registry_email"))
+    resolve = resolver or _resolves
+    for domain in name_domain_guesses(legal_name):
+        if email_domain and domain == email_domain:
+            continue
+        if resolve(domain):
+            direct.append((f"https://{domain}/", "name_guess"))
+    rounds: list[tuple[str, list[tuple[str, str]]]] = []
+    if direct:
+        rounds.append(("", direct))
+    rounds.extend((q, []) for q in queries)
+    for query, preset in rounds:
+        if preset:
+            homepages = [h for h, _k in preset if h not in seen_homepages]
+            kinds = dict(preset)
+        else:
+            try:
+                urls, _source = search(query)
+            except Exception:
+                urls = []
+            requests += 1
+            homepages = [h for h in candidate_homepages(urls) if h not in seen_homepages]
+            kinds = {h: "search" for h in homepages}
+            # stable sort: name-echoing domains first, search rank
+            # preserved within each group (directories rank high in raw
+            # results and would otherwise burn the candidate budget)
+            homepages.sort(key=lambda h: 0 if _domain_echoes_name(h, distinctive) else 1)
         seen_homepages.update(homepages)
-        # stable sort: name-echoing domains first, search rank preserved
-        # within each group (directories rank high in raw results and
-        # would otherwise burn the candidate budget)
-        homepages.sort(key=lambda h: 0 if _domain_echoes_name(h, distinctive) else 1)
         for homepage in homepages:
             if len(tried) >= max_candidates:
                 break
@@ -413,6 +507,16 @@ def discover_website(
                 rejected.append({"domain": domain, "reason": "crawl_error"})
                 continue
             requests += int(metrics.get("requests", 0) or 0)
+            if (kinds.get(homepage) in ("registry_email", "name_guess")
+                    and homepage.startswith("https://")
+                    and (not isinstance(record, dict)
+                         or record.get("status") == "source_error")):
+                # small Norwegian sites are often http-only
+                try:
+                    record, metrics = crawler("http://" + homepage[len("https://"):])
+                    requests += int(metrics.get("requests", 0) or 0)
+                except Exception:
+                    pass
             if not isinstance(record, dict) or record.get("status") != "available":
                 rejected.append({"domain": domain,
                                  "reason": str((record or {}).get("status") or "unavailable")})
@@ -432,16 +536,29 @@ def discover_website(
                 rejected.append({"domain": domain, "reason": "content_gate_failed"})
                 continue
             final_url = str(value.get("final_url") or homepage)
+            final_domain = _registered_domain(final_url).lower() or domain
+            echoes = _domain_echoes_name(f"https://{final_domain}/", distinctive)
+            kind = kinds.get(homepage, "search")
+            single_word = len(distinctive.split()) <= 1
+            if proof != "organisation_number" and (
+                    final_domain != domain
+                    or (kind == "registry_email" and not echoes)
+                    or (kind == "name_guess" and single_word)):
+                # a redirect to another domain, or an e-mail domain that
+                # is not the company's name, must prove the org number
+                rejected.append({"domain": domain, "reason": "name_only_on_foreign_domain"})
+                continue
             return {
                 "found": True,
                 "final_url": final_url,
                 "domain": str(value.get("registered_domain") or _registered_domain(final_url)),
                 "proof": proof,
                 "gate": gate,
+                "candidate_source": kinds.get(homepage, "search"),
                 "website_record": record,
                 "social_links": social_links_from_value(value),
                 "requests": requests,
-                "queries": queries[: queries.index(query) + 1],
+                "queries": queries[: queries.index(query) + 1] if query else [],
                 "candidates_tried": tried,
                 "rejected": rejected,
             }
