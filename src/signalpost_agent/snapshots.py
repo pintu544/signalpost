@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -58,7 +59,19 @@ def _strip_volatile(value: Any) -> Any:
                 and not (k in _ABSENT_WHEN and v in _ABSENT_WHEN[k])}
     if isinstance(value, list):
         return [_strip_volatile(v) for v in value]
+    if isinstance(value, str):
+        return _norm_url_hosts(value)
     return value
+
+
+# A site can answer as https://www.x.no/ in one run and https://x.no/ in
+# the next (redirect order). Same site: hash both spellings alike
+# (round-4 review: ALVSTAD BYGGSERVICE AS flipped between runs).
+_WWW_RE = re.compile(r"(?i)\b(https?://)www\.")
+
+
+def _norm_url_hosts(text: str) -> str:
+    return _WWW_RE.sub(r"\1", text) if "www." in text.lower() else text
 
 
 def evidence_hash(record: dict[str, Any]) -> str:
@@ -72,7 +85,7 @@ def evidence_hash(record: dict[str, Any]) -> str:
         "field": record.get("field"),
         "status": record.get("status"),
         "source_type": record.get("source_type"),
-        "source_url": record.get("source_url"),
+        "source_url": _strip_volatile(record.get("source_url")),
         "value": _strip_volatile(record.get("value")),
         "note": None if record.get("field") in _NOTE_DERIVED_FIELDS else record.get("note"),
     }

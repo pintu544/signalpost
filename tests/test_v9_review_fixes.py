@@ -486,3 +486,37 @@ class R3FoundByChannelStable(unittest.TestCase):
         a = {"field": "registry", "status": "available", "note": "x", "value": {}}
         b = dict(a, note="y")
         self.assertNotEqual(evidence_hash(a), evidence_hash(b))
+
+
+class R4WwwApexStable(unittest.TestCase):
+    """https://www.x.no/ vs https://x.no/ for the same site is not a
+    change (round-4 review: ALVSTAD BYGGSERVICE AS, 3 false modules)."""
+
+    def _recs(self, host):
+        url = f"https://{host}/"
+        return [
+            {"field": "website_discovered", "status": "available", "source_url": url,
+             "value": {"final_url": url, "registered_domain": "alvstadbygg.no",
+                       "proof": "organisation_number"}},
+            {"field": "website_deep", "status": "available", "source_url": url,
+             "value": {"facts": [{"field": "about_text", "value": "Vi bygger hus.",
+                                  "evidence_url": url + "om-oss"}]}},
+            {"field": "social", "status": "available", "source_url": url,
+             "value": {"links": [{"platform": "facebook", "url": "https://www.facebook.com/alvstad"}]}},
+        ]
+
+    def test_www_and_apex_hash_alike(self):
+        from signalpost_agent.snapshots import evidence_hash
+        for a, b in zip(self._recs("www.alvstadbygg.no"), self._recs("alvstadbygg.no")):
+            self.assertEqual(evidence_hash(a), evidence_hash(b), a["field"])
+
+    def test_other_host_change_still_detected(self):
+        from signalpost_agent.snapshots import evidence_hash
+        for a, b in zip(self._recs("alvstadbygg.no"), self._recs("alvstad.no")):
+            if a["field"] != "social":
+                self.assertNotEqual(evidence_hash(a), evidence_hash(b), a["field"])
+
+    def test_non_url_text_untouched(self):
+        from signalpost_agent.snapshots import _norm_url_hosts
+        self.assertEqual(_norm_url_hosts("see www.x.no"), "see www.x.no")
+        self.assertEqual(_norm_url_hosts("HTTPS://WWW.X.NO/a"), "HTTPS://X.NO/a")
