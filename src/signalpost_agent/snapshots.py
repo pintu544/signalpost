@@ -29,7 +29,10 @@ VOLATILE_FIELDS = {"content_sha256", "main_text_excerpt", "retrieved_at", "laten
                    # v9: discovery audit trail (which queries/candidates were
                    # tried, request counts) varies between identical runs;
                    # the outcome fields (url, domain, proof) are still hashed.
-                   "queries", "candidates_tried", "rejected", "requests"}
+                   "queries", "candidates_tried", "rejected", "requests",
+                   # per-run drop counters of the news connector (how many
+                   # external candidates search returned this time)
+                   "news_diagnostics"}
 
 
 def _strip_volatile(value: Any) -> Any:
