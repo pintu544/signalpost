@@ -65,9 +65,13 @@ def enrich_recall(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, in
                 "search_discovered_company_website", site_url,
                 value={"final_url": site_url, "registered_domain": site_domain,
                        "proof": discovery["proof"],
+                       "candidate_source": discovery.get("candidate_source", "search"),
                        "queries": discovery.get("queries", [])},
-                note="Company website found by web search; page names the "
-                     "company or its organisation number")
+                note={"registry_email": "Company website found from the registry e-mail domain",
+                      "name_guess": "Company website found at a domain spelled from the legal name",
+                      }.get(discovery.get("candidate_source", ""),
+                            "Company website found by web search")
+                     + "; page names the company or its organisation number")
         else:
             records["website_discovered"] = _evidence_record(
                 "website_discovered", "not_found",
