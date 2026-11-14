@@ -271,6 +271,10 @@ def normalize_entity(body: Any) -> dict[str, Any]:
         "business_address": body.get("forretningsadresse"),
         "postal_address": body.get("postadresse"),
         "latest_submitted_accounts": body.get("sisteInnsendteAarsregnskap"),
+        # A deleted entity answers 200 with respons_klasse "SlettetEnhet"
+        # and a slettedato, and almost no other fields.
+        "deleted_on": body.get("slettedato"),
+        "deleted": bool(body.get("slettedato")) or body.get("respons_klasse") == "SlettetEnhet",
     }
 
 

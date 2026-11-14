@@ -82,7 +82,8 @@ function badges(p){
   if(s.includes('News') && !p.sections.find(x=>x.title==='News').sentences[0].text.startsWith('No')) h += '<span class="badge b-info">news</span>';
   if(s.includes('Jobs') && !p.sections.find(x=>x.title==='Jobs').sentences[0].text.startsWith('No')) h += '<span class="badge b-ok">hiring</span>';
   const st = p.sections.find(x=>x.title==='Status').sentences[0].text;
-  if(st.startsWith('Registered as bankrupt')) h += '<span class="badge b-bad">bankrupt</span>';
+  if(st.startsWith('Deleted from')) h += '<span class="badge b-bad">deleted</span>';
+  else if(st.startsWith('Registered as bankrupt')) h += '<span class="badge b-bad">bankrupt</span>';
   else if(st.startsWith('Registered as under')) h += '<span class="badge b-warn">liquidating</span>';
   return h;
 }
@@ -216,7 +217,11 @@ def _compare_record(envelope: dict, changed_modules: int = 0) -> dict:
     prof = prof if isinstance(prof, dict) else {}
     evidence = prof.get("evidence")
     evidence = evidence if isinstance(evidence, dict) else {}
-    status = ("bankrupt" if prof.get("bankrupt")
+    live = evidence.get("registry_live") if isinstance(evidence.get("registry_live"), dict) else {}
+    live_val = live.get("value") if isinstance(live.get("value"), dict) else {}
+    status = ("deleted" + (f" {live_val.get('deleted_on')}" if live_val.get("deleted_on") else "")
+              if live_val.get("deleted")
+              else "bankrupt" if prof.get("bankrupt")
               else "under liquidation" if prof.get("liquidating") else "active")
     fin = evidence.get("financials")
     records = []

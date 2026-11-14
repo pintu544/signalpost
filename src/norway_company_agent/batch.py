@@ -102,6 +102,60 @@ def profiles_from_bulk(path: str | Path, organisation_numbers: Iterable[str]) ->
     }
 
 
+def resolve_absent_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    """Give a company that is missing from the bulk file real registry states.
+
+    The bulk file lists active entities only, so a company deleted after
+    the snapshot (or between snapshot and run) has no row. Without this,
+    its ``registry`` and ``accounting_obligation`` modules had no record
+    at all and the envelope ended as ``submission_error``. Uses the live
+    entity record (already fetched) to fill identity fields and records
+    explicit, terminal states instead. Never invents a value.
+    """
+    if not profile.get("_absent_from_snapshot"):
+        return profile
+    org = profile["organisation_number"]
+    records = profile.setdefault("evidence", {})
+    live = records.get("registry_live") or {}
+    value = live.get("value") if isinstance(live.get("value"), dict) else {}
+    if live.get("status") == "available" and value:
+        for key in ("name", "legal_form", "employees", "bankrupt", "liquidating", "website",
+                    "latest_submitted_accounts"):
+            if profile.get(key) in (None, "") and value.get(key) not in (None, ""):
+                profile[key] = value[key]
+        if value.get("deleted"):
+            profile["deleted_on"] = value.get("deleted_on")
+    deleted = bool(value.get("deleted"))
+    deleted_note = (f"; the live register lists the entity as deleted on {value.get('deleted_on')}"
+                    if deleted and value.get("deleted_on") else
+                    "; the live register lists the entity as deleted" if deleted else "")
+    if "registry" not in records:
+        records["registry"] = evidence(
+            "registry", "not_found", "official_registry_bulk",
+            "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv",
+            note="No row in the bulk register file (it lists active entities only)" + deleted_note,
+            source_row_key=org,
+        )
+    if "accounting_obligation" not in records:
+        if deleted:
+            records["accounting_obligation"] = evidence(
+                "accounting_obligation", "not_applicable", "official_rule_interpretation",
+                live.get("source_url") or f"https://data.brreg.no/enhetsregisteret/api/enheter/{org}",
+                note="Entity is deleted from the register"
+                     + (f" (deleted on {value.get('deleted_on')})" if value.get("deleted_on") else ""),
+                source_row_key=org,
+            )
+        elif live.get("status") == "available":
+            records["accounting_obligation"] = accounting_obligation_assessment(profile)
+        else:
+            records["accounting_obligation"] = evidence(
+                "accounting_obligation", "not_found", "official_rule_interpretation", "",
+                note="No registry record to classify (absent from bulk file and live register)",
+                source_row_key=org,
+            )
+    return profile
+
+
 def evidence_terminal_state(record: dict[str, Any] | None) -> str:
     if not record:
         return "submission_error"

@@ -186,12 +186,26 @@ def synthesize(envelope: dict[str, Any],
         legal_form = _str(profile.get("legal_form")) or _str(reg_val.get("legal_form"))
         muni = _str(profile.get("municipality"))
         industry = _str(profile.get("industry_label"))
-        id_sent = f"{name} ({org}) is registered as a {legal_form} in {muni}."
+        deleted = bool(reg_val.get("deleted"))
+        deleted_on = _str(reg_val.get("deleted_on"))
+        id_sent = f"{name} ({org})"
+        if deleted:
+            id_sent += " was"
+        id_sent += " registered"
+        if legal_form:
+            id_sent += f" as {'an' if legal_form[:1].upper() in 'AEFHILMNORSX' else 'a'} {legal_form}"
+        if muni:
+            id_sent += f" in {muni}"
+        id_sent += "."
         if industry:
             id_sent += f" Industry: {industry}."
         section("Identity", [(id_sent.strip(), [_ref(reg_rec)])])
         # status
-        if profile.get("bankrupt"):
+        if deleted:
+            section("Status", [(f"Deleted from the Brønnøysund register"
+                                + (f" on {deleted_on}" if deleted_on else "") + ".",
+                                [_ref(reg_rec)])])
+        elif profile.get("bankrupt"):
             section("Status", [("Registered as bankrupt in Brønnøysund.", [_ref(reg_rec)])])
         elif profile.get("liquidating"):
             section("Status", [("Registered as under liquidation.", [_ref(reg_rec)])])
@@ -358,6 +372,11 @@ def synthesize(envelope: dict[str, Any],
         if s_muni:
             intro += f" registered in {s_muni}"
         intro += "."
+        if reg_val.get("deleted"):
+            when = _str(reg_val.get("deleted_on"))
+            intro += (" It has been deleted from the Brønnøysund register"
+                      + (f" ({when})" if when else "")
+                      + "; the facts below are its last records, not a current company.")
         if s_industry:
             intro += f" Industry: {s_industry}."
         employees = profile.get("employees")
