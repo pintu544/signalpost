@@ -89,10 +89,15 @@ _RANK_GENERIC_TOKENS = {
 
 
 def _domain_echoes_name(homepage: str, distinctive: str) -> bool:
-    """Ranking heuristic: the domain label contains a distinctive name
-    token (companies very often embed their name in their domain).
-    Affects only the ORDER candidates are crawled in — the content
-    gate alone decides acceptance."""
+    """The domain label contains a distinctive name token (companies
+    very often embed their name in their domain).
+
+    Since v9 this is a FILTER for search candidates: a search result
+    whose domain does not echo the name is not crawled at all (bot
+    search results were mostly unrelated sites). Known recall cost:
+    brand or abbreviation domains (kramo.no) are not found via search;
+    the registry e-mail domain is their only route. Acceptance is still
+    decided by the content gate alone."""
     host = (urllib.parse.urlparse(homepage).hostname or "").lower()
     label = re.sub(r"[^a-z0-9æøå]", "", host)
     for token in re.split(r"\W+", distinctive.upper()):
@@ -354,6 +359,21 @@ def social_links_from_value(value: Any) -> list[dict[str, str]]:
     return sorted(found.values(), key=lambda i: (i["platform"], i["url"]))
 
 
+_PARKED_RE = re.compile(
+    r"\bis\s+parked\b|\bparked\s+(?:domain|free|by)\b|\bdomain\s+(?:is\s+|may\s+be\s+)?for\s+sale\b"
+    r"|\bthis\s+domain\s+(?:has\s+been\s+registered|is\s+registered|may\s+be\s+for\s+sale)"
+    r"|\bbuy\s+this\s+domain\b|\bdomenet\s+(?:er\s+)?(?:til\s+salgs|parkert|registrert\s+hos)"
+    r"|\bkj[øo]p\s+(?:dette\s+)?domenet\b|\bparkert\s+(?:domene|hos)\b"
+    r"|\b(?:sedo|dan\.com|afternic|bodis|parkingcrew|domeneshop\s+parkering)\b",
+    re.IGNORECASE)
+
+
+def is_parked_page(text: str) -> bool:
+    """True for registrar parking / domain-for-sale pages (v9 review
+    defect 5): such a page can print a name without being a website."""
+    return bool(_PARKED_RE.search(text or ""))
+
+
 FREEMAIL_DOMAINS = {
     "gmail.com", "googlemail.com", "hotmail.com", "hotmail.no", "outlook.com",
     "live.com", "live.no", "msn.com", "yahoo.com", "yahoo.no", "icloud.com",
@@ -411,15 +431,51 @@ def name_domain_guesses(legal_name: str, limit: int = 4) -> list[str]:
     return list(dict.fromkeys(guesses))[:limit]
 
 
-def _resolves(domain: str) -> bool:
-    """Cheap DNS check before crawling a guessed domain."""
-    import socket
+_DNS_TIMEOUT = 3.0
+_WILDCARD_IPS: set[str] | None = None
 
+
+def _lookup(domain: str) -> set[str]:
+    """A-record addresses for a domain, with a hard timeout; empty on failure."""
+    import socket
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FutureTimeout
+
+    pool = ThreadPoolExecutor(max_workers=1)
     try:
-        socket.getaddrinfo(domain, 443, proto=socket.IPPROTO_TCP)
-        return True
-    except Exception:
+        future = pool.submit(socket.getaddrinfo, domain, 443, 0, 0, socket.IPPROTO_TCP)
+        infos = future.result(timeout=_DNS_TIMEOUT)
+        return {str(info[4][0]) for info in infos}
+    except (FutureTimeout, Exception):
+        return set()
+    finally:
+        pool.shutdown(wait=False)
+
+
+def _wildcard_ips() -> set[str]:
+    """Addresses a network returns for names that cannot exist.
+
+    Some resolvers answer every lookup (ISP "search assist"). Their
+    answers are recorded once so a guessed domain that only resolves to
+    them does not count as existing; this keeps guess yield the same on
+    networks with and without wildcard DNS.
+    """
+    global _WILDCARD_IPS
+    if _WILDCARD_IPS is None:
+        import uuid
+
+        _WILDCARD_IPS = _lookup(f"sp-{uuid.uuid4().hex[:16]}-nx.no")
+    return _WILDCARD_IPS
+
+
+def _resolves(domain: str) -> bool:
+    """Cheap DNS check before crawling a guessed domain (timeout-bounded,
+    wildcard-DNS aware)."""
+    addresses = _lookup(domain)
+    if not addresses:
         return False
+    wildcard = _wildcard_ips()
+    return not (wildcard and addresses <= wildcard)
 
 
 def discover_website(
@@ -481,6 +537,8 @@ def discover_website(
     rounds.extend((q, None) for q in queries)
     rounds.append(("", _guesses))
     for query, preset in rounds:
+        if len(tried) >= max_candidates:
+            break  # budget spent: no further searches or DNS lookups
         if callable(preset):
             preset = preset()
             if not preset:
@@ -543,6 +601,15 @@ def discover_website(
                 continue
             final_url = str(value.get("final_url") or homepage)
             final_domain = _registered_domain(final_url).lower() or domain
+            final_host = (urllib.parse.urlparse(final_url).hostname or "").lower()
+            if final_domain in BLOCKED_DOMAINS or final_host in BLOCKED_DOMAINS:
+                # a redirect into a directory: directories print org
+                # numbers by design, so no proof type rescues it
+                rejected.append({"domain": domain, "reason": "redirect_to_blocked_domain"})
+                continue
+            if is_parked_page(_crawl_texts(value)):
+                rejected.append({"domain": domain, "reason": "parked_domain"})
+                continue
             echoes = _domain_echoes_name(f"https://{final_domain}/", distinctive)
             kind = kinds.get(homepage, "search")
             single_word = len(distinctive.split()) <= 1

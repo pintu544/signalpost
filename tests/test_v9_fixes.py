@@ -119,7 +119,8 @@ class ClosedPostingTests(unittest.TestCase):
         self.assertFalse(posting_is_closed("Vi søker en sveiser"))
 
     def test_closed_html_posting_rejected(self):
-        html = "<html><body><h1>Sveiser</h1><p>FRITID AS</p><p>Stillingen er besatt.</p></body></html>"
+        html = ("<html><body><h1>Sveiser</h1><p>FRITID AS, org.nr 990 869 189</p>"
+                "<p>Stillingen er besatt.</p></body></html>")
         job, reason = _job_from_posting_page(
             html, "https://x.no/jobb/1", "990869189", "FRITID AS", datetime.date(2026, 11, 14))
         self.assertIsNone(job)

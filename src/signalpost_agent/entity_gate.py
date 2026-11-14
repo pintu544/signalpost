@@ -129,46 +129,85 @@ def full_legal_name_pattern(legal_name: str) -> "re.Pattern[str] | None":
 # Words that may directly precede a company name without being part of
 # it ("Kontakt FRITID AS", "© Fritid AS").
 _NAME_LEADERS = {
+    # ordinary words that introduce a name
     "kontakt", "om", "velkommen", "copyright", "besøk", "besok", "hos", "fra",
-    "til", "org", "navn", "firma", "selskap", "eier", "drevet", "av", "og",
+    "til", "org", "navn", "firma", "selskap", "eier", "drevet", "av",
     "welcome", "contact", "about", "by", "at", "for", "med", "i", "på",
+    "levert", "utført", "eies", "eid", "ved", "under", "fra", "the",
+    # navigation / page-chrome words that sit right before a footer name
+    "hjem", "forside", "meny", "home", "menu", "tjenester", "produkter",
+    "nyheter", "aktuelt", "karriere", "personvern", "cookies", "privacy",
+    "adresse", "address", "telefon", "phone", "e-post", "epost", "email",
+    "bedrift", "foretak", "foretaksnavn", "selskapsnavn", "company",
 }
 _JOINERS = {"og", "&", "and", "+", "&amp;"}
+# Words that continue a company name after its legal form
+# ("Fritid AS Holding" is not FRITID AS).
+_NAME_CONTINUATIONS = {
+    "holding", "holdings", "group", "gruppen", "gruppe", "konsern", "invest",
+    "investering", "eiendom", "norge", "norway", "nordic", "norden",
+    "international", "int", "drift", "service", "services", "management",
+    "partner", "partners", "capital", "ventures", "avd", "avdeling", "filial",
+}
+_EDGE_PUNCT = "©:;,.()\"'«»|·•–—/"
+
+
+def _is_name_word(token: str) -> bool:
+    """A capitalised word that can be part of a company name."""
+    token = token.strip(_EDGE_PUNCT)
+    return bool(token) and token[:1].isalpha() and token[:1].isupper()
 
 
 def has_standalone_name(legal_name: str, text: str) -> bool:
     """True when the FULL legal name occurs at least once as its own name.
 
-    v9: an occurrence embedded in a longer name ("Tellus Caravan og
-    Fritid AS" contains "Fritid AS") is not the company. An occurrence
-    is embedded when the word before it is a joiner
-    ("og", "&", "and", "+"). Residual risk: a longer name with no joiner
-    ("Nordic Fritid AS") is not detected; the org number is the only
-    airtight proof.
+    v9: an occurrence embedded in a longer name is not the company. Both
+    neighbours are judged:
+
+    - before: a hyphen glued to the match ("Tellus-Fritid AS"), or a
+      capitalised name word that is not an ordinary leader word
+      ("Nordic Fritid AS"), or a joiner ("og", "&") preceded by a
+      capitalised name word ("Tellus Caravan og Fritid AS");
+    - after: a name-continuation word ("Fritid AS Holding",
+      "Fritid AS Group").
+
+    A word ending in sentence punctuation ("hytta. Fritid AS") bounds the
+    name. Page elements are joined with spaces, so a capitalised heading
+    word before the name ("Sveiser FRITID AS") also counts as embedded:
+    this rejects some real pages, but the org number still proves them.
+    Wrong-company proof is the costlier error.
     """
     pattern = full_legal_name_pattern(legal_name)
     if not pattern or not text:
         return False
     for match in pattern.finditer(text):
-        before = text[:match.start()].split()
+        head = text[:match.start()]
+        if head.endswith("-") or head.endswith("‐"):
+            continue  # glued prefix: "Tellus-Fritid AS"
+        before = head.split()
         prev = before[-1] if before else ""
-        prev_clean = prev.strip("©:;,.()\"'«»")
+        prev_clean = prev.strip(_EDGE_PUNCT)
         low = prev_clean.casefold()
-        if prev in _JOINERS or low in _JOINERS:
-            continue
-        if not prev_clean:
-            return True
-        if prev in _JOINERS or low in _JOINERS:
-            # joined to another name ("X og FRITID AS"), unless it is a
-            # plain sentence like "Alle i Oslo og FRITID AS" - treated
-            # as embedded; the org number still proves identity.
-            continue
+        after = text[match.end():].split()
+        nxt = after[0] if after else ""
+        nxt_low = nxt.strip("©:;,.()\"'«»|·•").casefold()
+        tail = text[match.end():match.end() + 2]
+        if tail[:1] in ("-", "‐") and tail[1:2].isalpha():
+            continue  # glued suffix: "Fritid AS-Holding"
+        if nxt_low in _NAME_CONTINUATIONS and nxt[:1] not in ".,;:":
+            continue  # "Fritid AS Holding"
+        if low in _JOINERS or prev in _JOINERS:
+            prev2 = before[-2] if len(before) > 1 else ""
+            if _is_name_word(prev2) and prev2.strip(_EDGE_PUNCT).casefold() not in _NAME_LEADERS:
+                continue  # "Tellus Caravan og Fritid AS", "Caravan & Fritid AS"
+            return True  # "Kontakt oss og Fritid AS"
+        if not prev_clean or prev[-1:] in ".:;|·•!?" or not prev_clean[:1].isalpha():
+            return True  # start of text, sentence end, separator, digits/©
         if low in _NAME_LEADERS:
             return True
-        # Any other preceding word: text from separate page elements is
-        # joined with spaces, so a capitalised neighbour ("Sveiser
-        # FRITID AS") is usually a heading, not part of the name.
-        return True
+        if _is_name_word(prev):
+            continue  # "Nordic Fritid AS"
+        return True  # lowercase ordinary word: "vi i Fritid AS"
     return False
 
 

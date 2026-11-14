@@ -79,8 +79,12 @@ def _opener_for(mapping):
 
 def _run(career_urls, mapping):
     # v9: a posting with its own URL is verified against its own page.
+    # (v9: a real page, not a JS shell; shells under 200 chars of text are
+    # dropped as unverifiable.)
     mapping = {"https://example.no/stillinger/123":
-               b"<html><body><h1>Backend-utvikler</h1><p>Vi s\xc3\xb8ker deg.</p></body></html>",
+               b"<html><body><h1>Backend-utvikler</h1><p>"
+               + b"Vi s\xc3\xb8ker en backend-utvikler til teamet v\xc3\xa5rt i Oslo. " * 6
+               + b"</p></body></html>",
                **mapping}
     website_mod = MagicMock()
     website_mod.SAFE_OPENER = _opener_for(mapping)

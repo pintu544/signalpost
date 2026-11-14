@@ -363,6 +363,11 @@ def extract_site_article(html_text: str, url: str) -> tuple[dict[str, Any] | Non
         if soup.find("meta", attrs={"property": "article:modified_time"}):
             modified_seen = True
     # <time datetime> — a publish signal on article pages
+    # <time datetime> counts only with PUBLISH semantics: itemprop
+    # datePublished, the HTML pubdate attribute, or a publish-named class
+    # (WordPress "entry-date published", "post-date"). A bare <time> is
+    # often an event or meeting date in the body or a sidebar, so it
+    # never counts on its own (v9 review defect 2).
     if not published:
         for time_el in soup.find_all("time"):
             stamp = time_el.get("datetime") or time_el.get("content")
@@ -371,8 +376,11 @@ def extract_site_article(html_text: str, url: str) -> tuple[dict[str, Any] | Non
             if ("dateModified" in props or re.search(r"modif|updated|endret", classes)):
                 modified_seen = True
                 continue
-            if stamp and ("datePublished" in props or time_el.find_parent("article")
-                          or soup.find("h1")):
+            publish_semantics = ("datePublished" in props
+                                 or time_el.has_attr("pubdate")
+                                 or re.search(r"\b(?:published|publish|pubdate|post-date|"
+                                              r"entry-date|publisert)\b", classes))
+            if stamp and publish_semantics:
                 candidate = _iso_date(stamp)
                 if candidate:
                     published = candidate

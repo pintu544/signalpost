@@ -121,9 +121,16 @@ def _posting(**overrides):
 def _run_jobs(page_bytes):
     opener = MagicMock()
 
+    # v9: a posting's own URL is fetched and must be a real (non-shell)
+    # open-posting page; the career page itself is PAGE_URL.
+    posting_page = ("<html><body><h1>Utvikler</h1><p>"
+                    + "Eksempel AS søker en utvikler til teamet vårt i Oslo. " * 6
+                    + "</p></body></html>").encode()
+
     def _open(req, timeout=None):
         resp = MagicMock()
-        resp.read.return_value = page_bytes
+        url = getattr(req, "full_url", str(req))
+        resp.read.return_value = page_bytes if url == PAGE_URL else posting_page
         ctx = MagicMock()
         ctx.__enter__.return_value = resp
         ctx.__exit__.return_value = False

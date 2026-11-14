@@ -145,6 +145,10 @@ def _application_deadline(text: str) -> datetime.date | None:
     return _find_date(text[match.end():match.end() + 48])
 
 
+# "closed on Sundays", "stengt i påsken" are opening hours, not status.
+_NOT_SCHEDULE = (r"(?!\s+(?:on|during|over|for\s+the|at|until|between|på|i|om|"
+                 r"mondays?|tuesdays?|wednesdays?|thursdays?|fridays?|saturdays?|"
+                 r"sundays?|weekends?|holidays?)\b)")
 _CLOSED_RE = re.compile(
     r"stillingen\s+er\s+(?:besatt|fylt|utl[øo]pt|stengt)"
     r"|stilling(?:en)?\s+(?:er\s+)?(?:besatt|fylt)"
@@ -152,9 +156,10 @@ _CLOSED_RE = re.compile(
     r"|ikke\s+lenger\s+(?:ledig|aktuell|tilgjengelig)"
     r"|stengt\s+for\s+s[øo]knader|utlysningen\s+er\s+avsluttet"
     r"|(?:position|job|vacancy|role|posting)\s+(?:has\s+been\s+|is\s+now\s+|is\s+)?"
-    r"(?:filled|closed|expired|no\s+longer\s+available)"
-    r"|no\s+longer\s+accepting\s+applications|applications?\s+(?:are\s+)?closed"
-    r"|this\s+(?:job|position|vacancy)\s+(?:is\s+)?(?:closed|expired)",
+    r"(?:filled|closed|expired|no\s+longer\s+available)" + _NOT_SCHEDULE +
+    r"|no\s+longer\s+accepting\s+applications"
+    r"|applications?\s+(?:are\s+|is\s+)?(?:now\s+)?closed" + _NOT_SCHEDULE +
+    r"|this\s+(?:job|position|vacancy)\s+(?:is\s+)?(?:closed|expired)" + _NOT_SCHEDULE,
     re.IGNORECASE)
 
 
@@ -211,9 +216,58 @@ def nav_posting_links(html_text: str, page_url: str) -> list[str]:
     return links
 
 
-def _nav_field(segment: str, name: str) -> str:
-    match = re.search(r'"' + name + r'":"([^"]*)"', segment)
-    return match.group(1) if match else ""
+def _balanced_object(text: str, start: int) -> str:
+    """The JSON object text starting at text[start] == "{", brace-matched
+    with string awareness; "" when unbalanced."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for pos in range(start, min(len(text), start + 500_000)):
+        char = text[pos]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:pos + 1]
+    return ""
+
+
+def _nav_ad_object(html_text: str, ad_id: str) -> dict[str, Any] | None:
+    """The parsed ``adData`` object whose own ``id`` is ``ad_id``.
+
+    Posting pages embed the ad in Next.js flight data, a JS string in
+    which JSON quotes are escaped (\\"). Both spellings are tried; every
+    ``"adData":{`` occurrence is parsed as a whole object, and only one
+    whose top-level id equals ``ad_id`` is returned. Fails closed.
+    """
+    import json
+
+    variants = [html_text]
+    if '\\"' in html_text:
+        variants.append(html_text.replace('\\\\', '\\').replace('\\"', '"'))
+    for text in variants:
+        for found in re.finditer(r'"adData"\s*:\s*\{', text):
+            raw = _balanced_object(text, found.end() - 1)
+            if not raw:
+                continue
+            try:
+                obj = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(obj, dict) and str(obj.get("id") or "").lower() == ad_id:
+                return obj
+    return None
 
 
 def job_from_nav_page(html_text: str, url: str, org_number: str,
@@ -228,31 +282,31 @@ def job_from_nav_page(html_text: str, url: str, org_number: str,
     if not match:
         return None, "not_nav"
     ad_id = match.group(1).lower()
-    flat = (html_text or "").replace('\\"', '"')
-    start = flat.find('"adData":{"id":"' + ad_id + '"')
-    if start < 0:
+    ad = _nav_ad_object(html_text or "", ad_id)
+    if ad is None:
         return None, "no_ad_data"
-    end = flat.find('"adData":{', start + 10)
-    segment = flat[start:end if end > 0 else start + 20000]
-    employer_at = segment.find('"employer":{')
-    employer = segment[employer_at:employer_at + 400] if employer_at >= 0 else ""
-    if _nav_field(employer, "orgnr") != re.sub(r"\D", "", org_number):
+    # Every field is read from inside THIS ad object only (v9 review
+    # defect 3: no borrowing from another employer block on the page).
+    employer = ad.get("employer") if isinstance(ad.get("employer"), dict) else {}
+    if str(employer.get("orgnr") or "") != re.sub(r"\D", "", org_number):
         return None, "employer_mismatch"
-    if _nav_field(segment, "status").upper() != "ACTIVE":
+    if str(ad.get("status") or "").upper() != "ACTIVE":
         return None, "closed"
-    for key in ("expires", "applicationDueDate"):
-        due = _parse_date(_nav_field(segment, key))
+    application = ad.get("application") if isinstance(ad.get("application"), dict) else {}
+    for value in (ad.get("expires"), application.get("applicationDueDate"),
+                  ad.get("applicationDueDate")):
+        due = _parse_date(value)
         if due is not None and due < today:
             return None, "closed"
-    title = _nav_field(segment, "title").strip()
+    title = str(ad.get("title") or ad.get("jobTitle") or "").strip()
     if not title:
         return None, "no_title"
-    posted = _parse_date(_nav_field(segment, "published"))
+    posted = _parse_date(ad.get("published"))
     return {
         "title": title[:200],
-        "hiring_organization": (_nav_field(employer, "name") or legal_name)[:200],
+        "hiring_organization": (str(employer.get("name") or "") or legal_name)[:200],
         "date_posted": posted.isoformat() if posted else "",
-        "employment_type": _nav_field(segment, "engagementType")[:50],
+        "employment_type": str(ad.get("engagementType") or "")[:50],
         "url": url,
         "url_is_posting_specific": True,
         "source": "arbeidsplassen.nav.no",
@@ -270,6 +324,14 @@ def _visible_date(text: str, soup: Any) -> datetime.date | None:
     publish date, so nothing is guessed.
     """
     for time_el in soup.find_all("time"):
+        # v9: only a <time> with publish semantics; a bare <time> may be
+        # the deadline or a start date.
+        props = str(time_el.get("itemprop") or "")
+        classes = " ".join(time_el.get("class") or []).casefold()
+        if not ("datePosted" in props or "datePublished" in props
+                or time_el.has_attr("pubdate")
+                or re.search(r"\b(?:published|posted|post-date|publisert)\b", classes)):
+            continue
         parsed = _parse_date(time_el.get("datetime") or "")
         if parsed:
             return parsed
@@ -278,9 +340,18 @@ def _visible_date(text: str, soup: Any) -> datetime.date | None:
         parsed = _parse_date(meta["content"])
         if parsed:
             return parsed
-    label = re.search(r"(publisert|published|lagt ut)\b", text, re.IGNORECASE)
+    from .news import labelled_publish_date
+
+    labelled = labelled_publish_date(text)
+    if labelled:
+        return _parse_date(labelled)
+    label = re.search(r"\blagt ut\b", text, re.IGNORECASE)
     if label:
-        return _find_date(text[label.end():label.end() + 48])
+        from .news import _LABELLED_DATE_RE
+        rest = re.sub(r"^\s*[:\-–]?\s*(?:den\s+)?", "", text[label.end():label.end() + 48])
+        anchored = _LABELLED_DATE_RE.match(rest)
+        if anchored:
+            return _find_date(anchored.group(0))
     return None
 
 
@@ -464,6 +535,11 @@ def extract_jobs_from_career_pages(
                 # v9: a posting with its own URL is verified against its
                 # own page: fetchable, and not marked filled/closed.
                 if own_url:
+                    # one shared fetch budget for all posting verification
+                    if html_fallback["fetches"] >= MAX_POSTING_FETCHES:
+                        dropped["unverifiable"] = dropped.get("unverifiable", 0) + 1
+                        continue
+                    html_fallback["fetches"] += 1
                     own_html = _fetch_posting_page(own_url)
                     requests += 1
                     if own_html is None:
@@ -471,6 +547,10 @@ def extract_jobs_from_career_pages(
                         continue
                     from .discover import visible_text
                     own_text = visible_text(own_html)
+                    if len(" ".join(own_text.split())) < 200:
+                        # a JS shell: the open/closed check would be vacuous
+                        dropped["unverifiable"] = dropped.get("unverifiable", 0) + 1
+                        continue
                     own_deadline = _application_deadline(own_text)
                     if posting_is_closed(own_text) or (
                             own_deadline is not None and own_deadline < today):

@@ -192,16 +192,30 @@ def labelled_publish_date(text: str) -> str:
     "den" or "on" may sit between). "" when there is none.
     """
     for label in re.finditer(r"\b(publisert|published)\b", text or "", re.IGNORECASE):
-        window = text[label.end():label.end() + 40]
-        match = re.match(r"\s*[:\-–]?\s*(?:den|on|date)?\s*[:\-–]?\s*", window, re.IGNORECASE)
-        rest = window[match.end():] if match else window
-        # the date must START the text after the label, not float in it
-        found = _find_date_any(rest[:24])
-        if found and _find_date_any(rest[:24]) is not None:
-            probe = rest[:24]
-            if re.match(r"\d{4}-\d{2}-\d{2}|\d{1,2}[.\s]|[A-Za-z]+\s+\d{1,2}", probe):
-                return found.strftime("%Y-%m-%dT%H:%M:%SZ")
+        # "Sist publisert" / "Last published" is a re-publish (modified)
+        # stamp, not the publication date.
+        lead = text[max(0, label.start() - 12):label.start()].casefold().split()
+        if lead and lead[-1] in ("sist", "last", "re", "oppdatert", "updated"):
+            continue
+        window = text[label.end():label.end() + 48]
+        sep = re.match(r"\s*[:\-–]?\s*(?:den\s+|on\s+|date\s*[:\-–]?\s*)?", window, re.IGNORECASE)
+        rest = window[sep.end():] if sep else window
+        # The date must START right after the label; it may not float
+        # later in the text ("Published in 2019 ... 5 May 2026").
+        anchored = _LABELLED_DATE_RE.match(rest)
+        if not anchored:
+            continue
+        found = _find_date_any(anchored.group(0))
+        if found:
+            return found.strftime("%Y-%m-%dT%H:%M:%SZ")
     return ""
+
+
+_LABELLED_DATE_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}"
+    r"|\d{1,2}\.\s?\d{1,2}\.\s?\d{4}"
+    r"|\d{1,2}\.?\s+[A-Za-zÆØÅæøå]+\.?\s+\d{4}"
+    r"|[A-Za-z]+\s+\d{1,2},?\s+\d{4}")
 
 
 def _verify_external_item(item: dict[str, Any], org_number: str,
