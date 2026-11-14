@@ -34,7 +34,15 @@ VOLATILE_FIELDS = {"content_sha256", "main_text_excerpt", "retrieved_at", "laten
                    # external candidates search returned this time)
                    "news_diagnostics",
                    # network property, not company content
-                   "dns_discriminates"}
+                   "dns_discriminates",
+                   # which discovery channel found the site (e-mail domain,
+                   # search, name guess) varies with live search results;
+                   # the site itself (final_url, domain, proof) is hashed
+                   "candidate_source"}
+
+# Records whose note is derived from a volatile value: for
+# website_discovered the note only names the discovery channel.
+_NOTE_DERIVED_FIELDS = {"website_discovered"}
 
 
 # Keys added to an existing record shape later: their "empty" value is
@@ -66,7 +74,7 @@ def evidence_hash(record: dict[str, Any]) -> str:
         "source_type": record.get("source_type"),
         "source_url": record.get("source_url"),
         "value": _strip_volatile(record.get("value")),
-        "note": record.get("note"),
+        "note": None if record.get("field") in _NOTE_DERIVED_FIELDS else record.get("note"),
     }
     return hashlib.sha256(_canonical(content).encode("utf-8")).hexdigest()
 

@@ -455,3 +455,34 @@ class R3DnsPoolBounded(unittest.TestCase):
         import signalpost_agent.discover as d
         self.assertIs(d._dns_pool(), d._dns_pool())
         self.assertEqual(d._dns_pool()._max_workers, 4)
+
+
+class R3FoundByChannelStable(unittest.TestCase):
+    """Same site found via search in one run and via a name guess in the
+    next must not count as a change (71f9991 live run, FYRI FISH AS)."""
+
+    def _rec(self, source, note, url="https://www.fyrifish.no/", proof="legal_name"):
+        return {"field": "website_discovered", "status": "available",
+                "source_type": "search_discovered_company_website", "source_url": url,
+                "note": note,
+                "value": {"final_url": url, "registered_domain": "fyrifish.no",
+                          "proof": proof, "candidate_source": source, "queries": []}}
+
+    def test_channel_change_keeps_hash(self):
+        from signalpost_agent.snapshots import evidence_hash
+        a = self._rec("search", "Company website found by web search; page names the company")
+        b = self._rec("name_guess", "Company website found at a domain spelled from the legal name; "
+                                    "page names the company")
+        self.assertEqual(evidence_hash(a), evidence_hash(b))
+
+    def test_real_changes_still_change_hash(self):
+        from signalpost_agent.snapshots import evidence_hash
+        a = self._rec("search", "n")
+        self.assertNotEqual(evidence_hash(a), evidence_hash(self._rec("search", "n", url="https://fyri.no/")))
+        self.assertNotEqual(evidence_hash(a), evidence_hash(self._rec("search", "n", proof="organisation_number")))
+
+    def test_note_still_hashed_for_other_modules(self):
+        from signalpost_agent.snapshots import evidence_hash
+        a = {"field": "registry", "status": "available", "note": "x", "value": {}}
+        b = dict(a, note="y")
+        self.assertNotEqual(evidence_hash(a), evidence_hash(b))
