@@ -465,21 +465,26 @@ def discover_website(
     # (a) the registry e-mail domain, (b) domains built from the name.
     # Both pass the same content gate; an e-mail domain that does not
     # echo the name must show the ORG NUMBER (owner/accountant trap).
-    direct: list[tuple[str, str]] = []
+    # Order: evidence before guesses. (1) registry e-mail domain, (2)
+    # search results, (3) name-derived guesses, DNS-checked lazily.
     email_domain = registry_email_domain(registry_email)
-    if email_domain:
-        direct.append((f"https://{email_domain}/", "registry_email"))
     resolve = resolver or _resolves
-    for domain in name_domain_guesses(legal_name):
-        if email_domain and domain == email_domain:
-            continue
-        if resolve(domain):
-            direct.append((f"https://{domain}/", "name_guess"))
-    rounds: list[tuple[str, list[tuple[str, str]]]] = []
-    if direct:
-        rounds.append(("", direct))
-    rounds.extend((q, []) for q in queries)
+
+    def _guesses() -> list[tuple[str, str]]:
+        return [(f"https://{d}/", "name_guess")
+                for d in name_domain_guesses(legal_name)
+                if d != email_domain and resolve(d)]
+
+    rounds: list[tuple[str, Any]] = []
+    if email_domain:
+        rounds.append(("", [(f"https://{email_domain}/", "registry_email")]))
+    rounds.extend((q, None) for q in queries)
+    rounds.append(("", _guesses))
     for query, preset in rounds:
+        if callable(preset):
+            preset = preset()
+            if not preset:
+                continue
         if preset:
             homepages = [h for h, _k in preset if h not in seen_homepages]
             kinds = dict(preset)
@@ -559,7 +564,8 @@ def discover_website(
                 "website_record": record,
                 "social_links": social_links_from_value(value),
                 "requests": requests,
-                "queries": queries[: queries.index(query) + 1] if query else [],
+                "queries": (queries[: queries.index(query) + 1] if query
+                            else ([] if kinds.get(homepage) == "registry_email" else queries)),
                 "candidates_tried": tried,
                 "rejected": rejected,
             }

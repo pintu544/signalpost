@@ -78,14 +78,32 @@ class DiscoveryGateTests(unittest.TestCase):
         self.assertFalse(result["found"])
         self.assertEqual(result["rejected"][0]["reason"], "content_gate_failed")
 
-    def test_abstains_on_zero_search_results(self):
+    def test_abstains_when_no_candidate_source_yields_anything(self):
+        # v9 contract: empty search alone no longer means abstain, since
+        # registry e-mail and name-derived domains are also candidates.
+        # With no e-mail domain, no search hits and no resolvable guess,
+        # the crawler is never called and discovery abstains.
         def crawl(_url):  # must never be called
             raise AssertionError("crawler called with no candidates")
         result = discover_website(
             ORG, NAME, "Oslo",
-            searcher=lambda q: ([], ""), crawler=crawl)
+            searcher=lambda q: ([], ""), crawler=crawl,
+            resolver=lambda _d: False)
         self.assertFalse(result["found"])
         self.assertEqual(result["candidates_tried"], [])
+
+    def test_empty_search_falls_back_to_resolvable_name_guess(self):
+        crawled = []
+
+        def crawl(url):
+            crawled.append(url)
+            return {"status": "not_found", "value": None}, {"requests": 1}
+        result = discover_website(
+            ORG, NAME, "Oslo",
+            searcher=lambda q: ([], ""), crawler=crawl,
+            resolver=lambda d: d == "acmeventures.no")
+        self.assertFalse(result["found"])
+        self.assertEqual(crawled[0], "https://acmeventures.no/")
 
     def test_abstains_on_fetch_failure(self):
         dead = {"field": "website", "status": "not_found", "value": None}
@@ -116,13 +134,16 @@ class DiscoveryGateTests(unittest.TestCase):
             record = good if "acme-ventures" in url else dead
             return record, {"requests": 1, "bytes": 0, "latencies_ms": []}
 
+        # every guess "resolves" here: search evidence must still be
+        # crawled before any name-derived guess (evidence before guesses)
         result = discover_website(
             ORG, NAME, "Oslo",
             searcher=lambda q: (["https://random-portal.no/acme",
                                  "https://acme-ventures.no/"], "fake"),
-            crawler=crawl)
+            crawler=crawl, resolver=lambda _d: True)
         self.assertTrue(result["found"])
         self.assertEqual(crawled[0], "https://acme-ventures.no/")
+        self.assertEqual(result["candidate_source"], "search")
 
     def test_verify_gate_collision_guard(self):
         # name present but surrounded by OTHER companies' org numbers:

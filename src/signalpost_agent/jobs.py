@@ -182,6 +182,85 @@ def _fetch_posting_page(url: str) -> str | None:
         return None
 
 
+# NAV arbeidsplassen postings. Counted ONLY when the company's verified
+# career page links to them; the posting page itself must carry our org
+# number as the employer and say the ad is ACTIVE and unexpired.
+_NAV_POSTING_RE = re.compile(
+    r"https?://arbeidsplassen\.nav\.no/stillinger/stilling/"
+    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+    re.IGNORECASE)
+
+
+def nav_posting_links(html_text: str, page_url: str) -> list[str]:
+    """arbeidsplassen.nav.no posting URLs linked from a career page."""
+    links: list[str] = []
+    try:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html_text, "lxml")
+    except Exception:
+        return links
+    for anchor in soup.find_all("a", href=True):
+        absolute = urllib.parse.urljoin(page_url, str(anchor.get("href") or ""))
+        match = _NAV_POSTING_RE.match(absolute)
+        if match:
+            url = ("https://arbeidsplassen.nav.no/stillinger/stilling/"
+                   + match.group(1).lower())
+            if url not in links:
+                links.append(url)
+    return links
+
+
+def _nav_field(segment: str, name: str) -> str:
+    match = re.search(r'"' + name + r'":"([^"]*)"', segment)
+    return match.group(1) if match else ""
+
+
+def job_from_nav_page(html_text: str, url: str, org_number: str,
+                      legal_name: str,
+                      today: datetime.date) -> tuple[dict[str, Any] | None, str]:
+    """Build a job from an arbeidsplassen posting page, or abstain.
+
+    Reads the page's embedded ``adData`` for THIS posting id only.
+    Reasons: not_nav, no_ad_data, employer_mismatch, closed, no_title.
+    """
+    match = _NAV_POSTING_RE.match(url or "")
+    if not match:
+        return None, "not_nav"
+    ad_id = match.group(1).lower()
+    flat = (html_text or "").replace('\\"', '"')
+    start = flat.find('"adData":{"id":"' + ad_id + '"')
+    if start < 0:
+        return None, "no_ad_data"
+    end = flat.find('"adData":{', start + 10)
+    segment = flat[start:end if end > 0 else start + 20000]
+    employer_at = segment.find('"employer":{')
+    employer = segment[employer_at:employer_at + 400] if employer_at >= 0 else ""
+    if _nav_field(employer, "orgnr") != re.sub(r"\D", "", org_number):
+        return None, "employer_mismatch"
+    if _nav_field(segment, "status").upper() != "ACTIVE":
+        return None, "closed"
+    for key in ("expires", "applicationDueDate"):
+        due = _parse_date(_nav_field(segment, key))
+        if due is not None and due < today:
+            return None, "closed"
+    title = _nav_field(segment, "title").strip()
+    if not title:
+        return None, "no_title"
+    posted = _parse_date(_nav_field(segment, "published"))
+    return {
+        "title": title[:200],
+        "hiring_organization": (_nav_field(employer, "name") or legal_name)[:200],
+        "date_posted": posted.isoformat() if posted else "",
+        "employment_type": _nav_field(segment, "engagementType")[:50],
+        "url": url,
+        "url_is_posting_specific": True,
+        "source": "arbeidsplassen.nav.no",
+        "linked_from_company_site": True,
+        "entity_proof": [f"organisation_number:{org_number}"],
+    }, ""
+
+
 def _visible_date(text: str, soup: Any) -> datetime.date | None:
     """A publish date visibly stated on a posting page, else None.
 
@@ -415,6 +494,32 @@ def extract_jobs_from_career_pages(
             # v7 fix C — HTML fallback, only when this page carried no
             # JobPosting JSON-LD at all: follow same-domain posting
             # links and let each posting page prove itself.
+            # v9: NAV arbeidsplassen postings linked from this verified
+            # career page; each is proven on its own posting page.
+            for nav_url in nav_posting_links(html_text, url):
+                if (html_fallback["fetches"] >= MAX_POSTING_FETCHES
+                        or len(jobs) >= MAX_JOBS_PER_COMPANY):
+                    break
+                html_fallback["fetches"] += 1
+                nav_html = _fetch_posting_page(nav_url)
+                requests += 1
+                if nav_html is None:
+                    drops = html_fallback["dropped"]
+                    drops["unverifiable"] = drops.get("unverifiable", 0) + 1
+                    continue
+                job, reason = job_from_nav_page(nav_html, nav_url, org_number,
+                                                legal_name, today)
+                if job is None:
+                    drops = html_fallback["dropped"]
+                    drops[reason] = drops.get(reason, 0) + 1
+                    continue
+                key = (job["title"] + job["hiring_organization"] + job["url"]).casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+                job["career_page"] = url
+                jobs.append(job)
+                html_fallback["published"] += 1
             if not raw_postings:
                 for link in _posting_links(html_text, url, registry_domain):
                     if (html_fallback["fetches"] >= MAX_POSTING_FETCHES

@@ -226,3 +226,102 @@ class PlaceholderAndSearchFilterTests(unittest.TestCase):
             searcher=lambda q: (["https://www.zhihu.com/q/1", "https://steinly.no/kontakt"], "bing"),
             crawler=crawl, fetcher=lambda u: None, resolver=lambda d: False)
         self.assertEqual(crawled, ["https://steinly.no/"])
+
+
+class CandidateOrderTests(unittest.TestCase):
+    def test_email_then_search_then_guess(self):
+        crawled = []
+
+        def crawl(url):
+            crawled.append(url)
+            return {"status": "not_found", "value": None}, {"requests": 1}
+
+        discover_website(
+            "123456789", "ACME VENTURES AS", "Oslo",
+            registry_email="post@acme-mail.no",
+            searcher=lambda q: (["https://acme-ventures.no/x"], "bing"),
+            crawler=crawl, fetcher=lambda u: None, resolver=lambda _d: True)
+        self.assertEqual(crawled[:3], ["https://acme-mail.no/",
+                                       "https://acme-ventures.no/",
+                                       "https://acmeventures.no/"])
+
+
+NAV_ID = "0d973775-c576-460c-a435-8cc1a1f4754f"
+NAV_URL = "https://arbeidsplassen.nav.no/stillinger/stilling/" + NAV_ID
+
+
+def _nav_page(status="ACTIVE", orgnr="932952343", expires="2026-12-24T22:59:59.000Z"):
+    # mirrors the escaped Next.js flight data on live posting pages
+    ad = ('{\\"adData\\":{\\"id\\":\\"%s\\",\\"status\\":\\"%s\\",\\"title\\":\\"Er du en dyktig sveiser?\\",'
+          '\\"published\\":\\"2026-11-11T23:00:01.000Z\\",\\"expires\\":\\"%s\\",'
+          '\\"application\\":{\\"applicationDueDate\\":\\"2026-12-24T00:00:00.000Z\\"},'
+          '\\"engagementType\\":\\"Fast\\",\\"employer\\":{\\"orgnr\\":\\"%s\\",\\"name\\":\\"Vestpersonell AS\\"}}}'
+          % (NAV_ID, status, expires, orgnr))
+    other = ('{\\"adData\\":{\\"id\\":\\"11111111-1111-1111-1111-111111111111\\",\\"status\\":\\"INACTIVE\\",'
+             '\\"employer\\":{\\"orgnr\\":\\"999999999\\"}}}')
+    return f'<html><body><script>self.__next_f.push([1,"{ad}{other}"])</script></body></html>'
+
+
+class NavPostingTests(unittest.TestCase):
+    TODAY = datetime.date(2026, 11, 14)
+
+    def test_links_only_nav_postings(self):
+        from signalpost_agent.jobs import nav_posting_links
+        html = (f'<a href="{NAV_URL}?utm=x">Sveiser</a>'
+                '<a href="https://arbeidsplassen.nav.no/stillinger?q=x">Søk</a>')
+        self.assertEqual(nav_posting_links(html, "https://vestpersonell.no/karriere"), [NAV_URL])
+
+    def test_active_posting_for_our_org_is_accepted(self):
+        from signalpost_agent.jobs import job_from_nav_page
+        job, reason = job_from_nav_page(_nav_page(), NAV_URL, "932952343",
+                                        "VESTPERSONELL AS", self.TODAY)
+        self.assertEqual(reason, "")
+        self.assertEqual(job["title"], "Er du en dyktig sveiser?")
+        self.assertEqual(job["date_posted"], "2026-11-11")
+        self.assertEqual(job["entity_proof"], ["organisation_number:932952343"])
+
+    def test_other_employer_inactive_and_expired_rejected(self):
+        from signalpost_agent.jobs import job_from_nav_page
+        cases = {"employer_mismatch": _nav_page(orgnr="123456789"),
+                 "closed": _nav_page(status="INACTIVE")}
+        for want, page in cases.items():
+            self.assertEqual(job_from_nav_page(page, NAV_URL, "932952343", "X AS",
+                                               self.TODAY)[1], want)
+        expired = _nav_page(expires="2026-11-01T00:00:00.000Z")
+        self.assertEqual(job_from_nav_page(expired, NAV_URL, "932952343", "X AS",
+                                           self.TODAY)[1], "closed")
+
+    def test_portal_only_posting_is_never_fetched(self):
+        # extract_jobs_from_career_pages only sees NAV links that sit on
+        # the verified career page; no search of arbeidsplassen exists.
+        import signalpost_agent.jobs as jobs_mod
+        self.assertFalse(hasattr(jobs_mod, "search_arbeidsplassen"))
+
+
+class NavEndToEndTests(unittest.TestCase):
+    def test_career_page_link_to_nav_posting_publishes(self):
+        from unittest.mock import MagicMock, patch
+
+        from signalpost_agent.jobs import extract_jobs_from_career_pages
+        career = "https://vestpersonell.no/karriere"
+        pages = {career: f'<html><body><a href="{NAV_URL}">Sveiser</a></body></html>'.encode(),
+                 NAV_URL: _nav_page().encode()}
+
+        def _open(req, timeout=None):
+            resp = MagicMock()
+            resp.read.return_value = pages[req.full_url]
+            ctx = MagicMock()
+            ctx.__enter__.return_value = resp
+            ctx.__exit__.return_value = False
+            return ctx
+
+        website = MagicMock()
+        website.SAFE_OPENER.open.side_effect = _open
+        website.USER_AGENT = "test"
+        website.assert_public_url = lambda url: None
+        with patch.dict("sys.modules", {"norway_company_agent.website": website}):
+            result = extract_jobs_from_career_pages(
+                "932952343", "VESTPERSONELL AS", "vestpersonell.no", [career],
+                today=datetime.date(2026, 11, 14))
+        self.assertEqual([j["url"] for j in result["jobs"]], [NAV_URL])
+        self.assertEqual(result["jobs"][0]["career_page"], career)
