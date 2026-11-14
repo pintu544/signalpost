@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from norway_company_agent.batch import profile_complete_for_modules, profiles_from_bulk, read_organisation_inputs, resolve_absent_profile, terminal_envelope, validate_envelopes  # noqa: E402
+from norway_company_agent.batch import profile_complete_for_modules, profiles_from_bulk, read_organisation_inputs, reconcile_with_live, resolve_absent_profile, terminal_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.evidence import utc_now  # noqa: E402
 from norway_company_agent.identity import apply_website_identity_gate  # noqa: E402
 from norway_company_agent.official import fetch_official_modules  # noqa: E402
@@ -70,6 +70,7 @@ def main() -> None:
         # companies absent from the bulk file (e.g. deleted) get explicit
         # registry states instead of a submission_error envelope
         resolve_absent_profile(profile)
+        reconcile_with_live(profile)
         website_metrics = {"requests": 0, "bytes": 0, "latencies_ms": []}
         if "website" in requested_modules:
             website_record, website_metrics = fetch_website(profile.get("website"))

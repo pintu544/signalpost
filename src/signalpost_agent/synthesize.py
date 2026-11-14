@@ -113,8 +113,11 @@ _SITE_ORIGIN = {
 }
 
 
+# Privacy words alone are not chrome (a privacy consultancy describes
+# itself with them); only the policy/notice phrases are (round-3 review).
 _CHROME_RE = re.compile(
-    r"informasjonskapsler|cookies?\b|personvern|privacy|samtykke|consent|"
+    r"informasjonskapsler|cookies?\b|personvernerkl[æa]ring|personvern\s*(?:policy|vilk)|"
+    r"privacy\s+(?:policy|notice|statement|settings)|samtykke|consent|"
     r"javascript|nettleser|browser|logg inn|log in|sign in|handlekurv|"
     r"cart\b|alle rettigheter|all rights reserved|©", re.IGNORECASE)
 _NAV_WORDS = {"hjem", "forside", "home", "meny", "menu", "om", "oss", "kontakt",
@@ -259,6 +262,11 @@ def synthesize(envelope: dict[str, Any],
                           [_ref(fin_rec)]))
         if len(records) > 1:
             sents.append((f"{len(records)} years of accounts on file.", [_ref(fin_rec)]))
+        if reg_val.get("deleted"):
+            # historical framing in the section itself, not only in the Summary
+            sents.insert(0, ("These are the accounts filed before the company was deleted "
+                             "from the register; there is no current financial year.",
+                             [_ref(reg_rec)]))
         section("Financials", sents)
     else:
         section("Financials", [("No annual accounts found in checked sources.", [_ref(fin_rec)])])

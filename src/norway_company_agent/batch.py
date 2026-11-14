@@ -156,6 +156,49 @@ def resolve_absent_profile(profile: dict[str, Any]) -> dict[str, Any]:
     return profile
 
 
+def reconcile_with_live(profile: dict[str, Any]) -> dict[str, Any]:
+    """Make module states agree with the live register (round-3 review).
+
+    - Deleted in the live register but still present in an older bulk
+      snapshot: the bulk row stays (it is a real source) but is annotated,
+      and the accounting obligation becomes not_applicable, so module
+      states no longer present a deleted company as active.
+    - Unknown to the live register (404): an empty subunit list is not
+      "available locations", it is not_found.
+    Never invents a value; only re-labels with an explanatory note.
+    """
+    records = profile.get("evidence") or {}
+    live = records.get("registry_live") or {}
+    value = live.get("value") if isinstance(live.get("value"), dict) else {}
+    org = profile.get("organisation_number")
+    if live.get("status") == "available" and value.get("deleted"):
+        when = value.get("deleted_on")
+        suffix = f" (deleted on {when})" if when else ""
+        profile.setdefault("deleted_on", when)
+        bulk = records.get("registry")
+        if isinstance(bulk, dict) and bulk.get("status") == "available":
+            note = str(bulk.get("note") or "")
+            extra = ("Bulk snapshot predates the deletion; the live register lists "
+                     "the entity as deleted" + suffix)
+            if extra not in note:
+                bulk["note"] = f"{note}; {extra}" if note else extra
+        acc = records.get("accounting_obligation")
+        if not isinstance(acc, dict) or acc.get("status") != "not_applicable":
+            records["accounting_obligation"] = evidence(
+                "accounting_obligation", "not_applicable", "official_rule_interpretation",
+                live.get("source_url") or f"https://data.brreg.no/enhetsregisteret/api/enheter/{org}",
+                note="Entity is deleted from the register" + suffix,
+                source_row_key=org,
+            )
+    if live.get("status") == "not_found":
+        loc = records.get("locations")
+        locs = (loc.get("value") or {}).get("locations") if isinstance(loc, dict) and isinstance(loc.get("value"), dict) else None
+        if isinstance(loc, dict) and loc.get("status") == "available" and not locs:
+            loc["status"] = "not_found"
+            loc["note"] = "Entity unknown to the live register; the subunit list is empty"
+    return profile
+
+
 def evidence_terminal_state(record: dict[str, Any] | None) -> str:
     if not record:
         return "submission_error"

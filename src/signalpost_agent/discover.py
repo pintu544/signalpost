@@ -382,7 +382,20 @@ def is_parked_page(text: str) -> bool:
     text = text or ""
     if _PARKED_RE.search(text):
         return True
-    return bool(_PLACEHOLDER_RE.search(text)) and len(text.split()) < 60
+    if not _PLACEHOLDER_RE.search(text) or len(text.split()) >= 60:
+        return False
+    # A sparse but REAL homepage ("ny nettside under oppbygging, ring oss
+    # på 22 33 44 55") still carries contact or identity signals; only a
+    # page with none of them is a placeholder (round-3 review).
+    return not _CONTACT_SIGNAL_RE.search(text)
+
+
+_CONTACT_SIGNAL_RE = re.compile(
+    r"[\w.+-]+@[\w-]+\.[\w.]+"                       # e-mail
+    r"|(?:\+47[\s-]?)?(?<!\d)\d{2}[\s-]?\d{2}[\s-]?\d{2}[\s-]?\d{2}(?!\d)"  # NO phone
+    r"|(?<!\d)\d{3}[\s-]?\d{3}[\s-]?\d{3}(?!\d)"     # org number
+    r"|\b(?:telefon|tlf|ring\s+oss|kontakt\s+oss|e-post|epost|adresse|org\.?\s*nr)\b",
+    re.IGNORECASE)
 
 
 FREEMAIL_DOMAINS = {
@@ -449,18 +462,31 @@ _WILDCARD_IPS: set[str] | None = None
 def _lookup(domain: str) -> set[str]:
     """A-record addresses for a domain, with a hard timeout; empty on failure."""
     import socket
-    from concurrent.futures import ThreadPoolExecutor
     from concurrent.futures import TimeoutError as FutureTimeout
 
-    pool = ThreadPoolExecutor(max_workers=1)
     try:
-        future = pool.submit(socket.getaddrinfo, domain, 443, 0, 0, socket.IPPROTO_TCP)
+        future = _dns_pool().submit(socket.getaddrinfo, domain, 443, 0, 0, socket.IPPROTO_TCP)
         infos = future.result(timeout=_DNS_TIMEOUT)
         return {str(info[4][0]) for info in infos}
     except (FutureTimeout, Exception):
         return set()
-    finally:
-        pool.shutdown(wait=False)
+
+
+_DNS_POOL = None
+_DNS_POOL_LOCK = __import__("threading").Lock()
+
+
+def _dns_pool():
+    """One small shared pool for DNS lookups: a hung resolver can block
+    at most 4 worker threads in total, instead of leaking one thread per
+    guessed domain (round-3 review)."""
+    global _DNS_POOL
+    with _DNS_POOL_LOCK:
+        if _DNS_POOL is None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            _DNS_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="sp-dns")
+        return _DNS_POOL
 
 
 def _wildcard_ips() -> set[str]:

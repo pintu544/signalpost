@@ -152,6 +152,14 @@ _NAME_CONTINUATIONS = {
 _EDGE_PUNCT = "©:;,.()\"'«»|·•–—/"
 # hyphen-like characters that glue a name to a neighbour word
 _GLUE = ("-", "\u2010", "\u2011", "\u2012", "\u2013")
+# a dash standing alone between words ("Tellus - Fritid AS")
+_DASHES = {"-", "\u2010", "\u2011", "\u2012", "\u2013", "\u2014", "--"}
+# group/ownership words: after a comma they still continue the name
+# ("Fritid AS, Holding"); branch words ("avd.", "filial") do not.
+_GROUP_CONTINUATIONS = {
+    "holding", "holdings", "group", "gruppen", "gruppe", "konsern", "invest",
+    "investering", "capital", "ventures", "partners", "international",
+}
 
 
 def _is_name_word(token: str) -> bool:
@@ -198,12 +206,19 @@ def has_standalone_name(legal_name: str, text: str) -> bool:
         if tail[:1] in _GLUE and tail[1:2].isalpha():
             continue  # glued suffix: "Fritid AS-Holding"
         # skip pure separator tokens ("Fritid AS - Holding")
-        rest_tokens = [t for t in after[:3] if t.strip("-‐‑–—|·•/")]
+        rest_tokens = [t for t in after[:3] if t.strip("-‐‑–—|·•/,;:")]
         nxt = rest_tokens[0] if rest_tokens else ""
         nxt_low = nxt.strip("©:;,.()\"'«»|·•").casefold()
-        if nxt_low in _NAME_CONTINUATIONS and nxt[:1] not in ".,;:" and \
-                not (after and after[0][-1:] in ".,;:"):
+        comma_after = bool(after) and after[0][:1] in ",;:" or tail[:1] in ",;:"
+        if nxt_low in _NAME_CONTINUATIONS and nxt[:1] not in ".,;:" and not comma_after:
             continue  # "Fritid AS Holding", "Fritid AS - Group"
+        if comma_after and nxt_low in _GROUP_CONTINUATIONS:
+            continue  # "Fritid AS, Holding" (a branch, "avd. Oslo", stays fine)
+        if prev in _DASHES and len(before) > 1:
+            prev2 = before[-2]
+            if _is_name_word(prev2) and prev2.strip(_EDGE_PUNCT).casefold() not in _NAME_LEADERS:
+                continue  # spaced-dash prefix: "Tellus - Fritid AS"
+            return True  # "Hjem - Fritid AS"
         if low in _JOINERS or prev in _JOINERS:
             prev2 = before[-2] if len(before) > 1 else ""
             if _is_name_word(prev2) and prev2.strip(_EDGE_PUNCT).casefold() not in _NAME_LEADERS:

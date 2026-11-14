@@ -78,7 +78,10 @@ def enrich_recall(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, in
                 "search_discovered_company_website", "",
                 value={"queries": discovery.get("queries", []),
                        "candidates_tried": discovery.get("candidates_tried", []),
-                       "rejected": discovery.get("rejected", [])},
+                       "rejected": discovery.get("rejected", []),
+                       # False when this network answers every DNS lookup,
+                       # so name guesses were not pre-filtered by DNS
+                       "dns_discriminates": discovery.get("dns_discriminates", True)},
                 note="No search-discovered website passed content verification")
     site_value = site_record.get("value") or {}
 

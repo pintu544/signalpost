@@ -219,10 +219,13 @@ def _compare_record(envelope: dict, changed_modules: int = 0) -> dict:
     evidence = evidence if isinstance(evidence, dict) else {}
     live = evidence.get("registry_live") if isinstance(evidence.get("registry_live"), dict) else {}
     live_val = live.get("value") if isinstance(live.get("value"), dict) else {}
-    status = ("deleted" + (f" {live_val.get('deleted_on')}" if live_val.get("deleted_on") else "")
-              if live_val.get("deleted")
-              else "bankrupt" if prof.get("bankrupt")
-              else "under liquidation" if prof.get("liquidating") else "active")
+    if live_val.get("deleted"):
+        status = "deleted" + (f" {live_val.get('deleted_on')}" if live_val.get("deleted_on") else "")
+    elif live.get("status") != "available":
+        status = "unknown"  # no live register record: no basis for "active"
+    else:
+        status = ("bankrupt" if prof.get("bankrupt")
+                  else "under liquidation" if prof.get("liquidating") else "active")
     fin = evidence.get("financials")
     records = []
     if isinstance(fin, dict):

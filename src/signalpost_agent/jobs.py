@@ -155,7 +155,7 @@ _NOT_SCHEDULE = (r"(?!\s+(?:on|during|over|for\s+the|at|until(?!\s+further\s+not
 _CLOSED_RE = re.compile(
     r"stillingen\s+er\s+(?:besatt|fylt|utl[øo]pt|stengt)"
     r"|stilling(?:en)?\s+(?:er\s+)?(?:besatt|fylt)"
-    r"|s[øo]knadsfristen?\s+(?:er\s+)?(?:ute|utl[øo]pt|passert|gått\s+ut)"
+    r"|s[øo]knadsfristen?\s+(?:er\s+|har\s+)?(?:ute|utl[øo]pt|passert|gått\s+ut)"
     r"|ikke\s+lenger\s+(?:ledig|aktuell|tilgjengelig)"
     r"|stengt\s+for\s+s[øo]knader|utlysningen\s+er\s+avsluttet"
     r"|(?:position|job|vacancy|role|posting)\s+(?:has\s+been\s+|is\s+now\s+|is\s+)?"

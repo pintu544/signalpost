@@ -32,12 +32,22 @@ VOLATILE_FIELDS = {"content_sha256", "main_text_excerpt", "retrieved_at", "laten
                    "queries", "candidates_tried", "rejected", "requests",
                    # per-run drop counters of the news connector (how many
                    # external candidates search returned this time)
-                   "news_diagnostics"}
+                   "news_diagnostics",
+                   # network property, not company content
+                   "dns_discriminates"}
+
+
+# Keys added to an existing record shape later: their "empty" value is
+# treated as absent so the upgrade does not rehash every old snapshot
+# (round-3 review: registry_live gained deleted/deleted_on in a6a8295).
+_ABSENT_WHEN = {"deleted": (False, None), "deleted_on": (None, "")}
 
 
 def _strip_volatile(value: Any) -> Any:
     if isinstance(value, dict):
-        return {k: _strip_volatile(v) for k, v in value.items() if k not in VOLATILE_FIELDS}
+        return {k: _strip_volatile(v) for k, v in value.items()
+                if k not in VOLATILE_FIELDS
+                and not (k in _ABSENT_WHEN and v in _ABSENT_WHEN[k])}
     if isinstance(value, list):
         return [_strip_volatile(v) for v in value]
     return value

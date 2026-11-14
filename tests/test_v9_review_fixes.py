@@ -327,3 +327,131 @@ class R2WildcardDns(unittest.TestCase):
             self.assertTrue(_REAL_RESOLVES("real.no"))
             self.assertFalse(_REAL_RESOLVES("guess.no"))
             self.assertTrue(d.DNS_DISCRIMINATES)
+
+
+# --------------------------------------------------------------------------
+# Review round 3 (a6a8295) -- all LOW items
+# --------------------------------------------------------------------------
+
+class R3NamePunctuation(unittest.TestCase):
+    def test_rejects(self):
+        for text in ("Fritid AS , Holding", "Fritid AS, Holding", "Tellus - Fritid AS",
+                     "Tellus \u2013 Fritid AS", "Tellus \u2014 Fritid AS"):
+            self.assertFalse(has_standalone_name("FRITID AS", text), text)
+
+    def test_accepts(self):
+        for text in ("Fritid AS, avd. Oslo", "Fritid AS\u2019s avdeling", "Hjem - Fritid AS",
+                     "Fritid AS , Bergen", "Fritid AS, 5003 Bergen", "Fritid AS - Hjem"):
+            self.assertTrue(has_standalone_name("FRITID AS", text), text)
+
+
+class R3ParkedSparseRealPage(unittest.TestCase):
+    def test_sparse_real_homepage_not_parked(self):
+        page = ("Bygg og Montasje AS. Ny nettside under oppbygging, men ta kontakt "
+                "på telefon 22 33 44 55 eller post@byggmontasje.no.")
+        self.assertFalse(is_parked_page(page))
+
+    def test_bare_placeholder_still_parked(self):
+        self.assertTrue(is_parked_page("Under construction. Coming soon."))
+
+
+class R3ClosedPastTense(unittest.TestCase):
+    def test_deadline_has_passed(self):
+        self.assertTrue(posting_is_closed("Søknadsfristen har passert"))
+        self.assertTrue(posting_is_closed("Søknadsfristen er utløpt"))
+
+
+class R3ChromePrivacyBusiness(unittest.TestCase):
+    def test_privacy_consultancy_is_quoted(self):
+        from signalpost_agent.synthesize import _first_sentence
+        self.assertEqual(_first_sentence("Vi hjelper bedrifter med personvern og GDPR i hele Norge."),
+                         "Vi hjelper bedrifter med personvern og GDPR i hele Norge.")
+        self.assertEqual(_first_sentence("Les vår personvernerklæring her og godta vilkårene."), "")
+
+
+def _live(status, value=None):
+    return {"field": "registry_live", "status": status, "source_type": "official_registry_live",
+            "source_url": "https://data.brreg.no/enhetsregisteret/api/enheter/922564183",
+            "value": value}
+
+
+class R3StaleSnapshotDeletion(unittest.TestCase):
+    def test_bulk_present_live_deleted(self):
+        from norway_company_agent.batch import reconcile_with_live, terminal_envelope
+        profile = {"organisation_number": "922564183", "evidence": {
+            "registry": {"field": "registry", "status": "available", "value": {"navn": "RAKNES"}},
+            "accounting_obligation": {"field": "accounting_obligation", "status": "available"},
+            "registry_live": _live("available", {"name": "RAKNES UTLEIESERVICE AS",
+                                                 "deleted": True, "deleted_on": "2026-10-13"})}}
+        reconcile_with_live(profile)
+        ev = profile["evidence"]
+        self.assertEqual(ev["registry"]["status"], "available")
+        self.assertIn("deleted (deleted on 2026-10-13)", ev["registry"]["note"])
+        self.assertEqual(ev["accounting_obligation"]["status"], "not_applicable")
+        env = terminal_envelope(profile, run_id="t", modules=["registry", "accounting_obligation"],
+                                started_at="a", completed_at="b")
+        self.assertEqual(env["contract_states"]["accounting_obligation"], "not_applicable")
+        reconcile_with_live(profile)  # idempotent: note not duplicated
+        self.assertEqual(ev["registry"]["note"].count("predates the deletion"), 1)
+
+    def test_unknown_org_empty_locations_not_found(self):
+        from norway_company_agent.batch import reconcile_with_live
+        profile = {"organisation_number": "999999999", "evidence": {
+            "registry_live": _live("not_found"),
+            "locations": {"field": "locations", "status": "available", "value": {"locations": []}}}}
+        reconcile_with_live(profile)
+        self.assertEqual(profile["evidence"]["locations"]["status"], "not_found")
+
+    def test_active_company_untouched(self):
+        from norway_company_agent.batch import reconcile_with_live
+        profile = {"organisation_number": "1", "evidence": {
+            "registry_live": _live("available", {"name": "X AS", "deleted": False}),
+            "accounting_obligation": {"status": "available"}}}
+        reconcile_with_live(profile)
+        self.assertEqual(profile["evidence"]["accounting_obligation"], {"status": "available"})
+
+
+class R3DeletedFinancialsFraming(unittest.TestCase):
+    def test_financials_section_is_historical(self):
+        from signalpost_agent.synthesize import synthesize
+        env = {"organisation_number": "922564183", "profile": {"name": "RAKNES UTLEIESERVICE AS",
+               "legal_form": "AS", "evidence": {
+                   "registry_live": _live("available", {"name": "RAKNES UTLEIESERVICE AS",
+                                                        "deleted": True, "deleted_on": "2026-10-13"}),
+                   "financials": {"status": "available", "value": {"records": [
+                       {"period": {"tilDato": "2025-12-31"}, "revenue": 260000, "annual_result": 53000}]}}}}}
+        fin = next(s for s in synthesize(env)["sections"] if s["title"] == "Financials")
+        self.assertTrue(fin["sentences"][0]["text"].startswith("These are the accounts filed before"))
+
+
+class R3HashMigration(unittest.TestCase):
+    def test_new_falsy_keys_do_not_rehash(self):
+        from signalpost_agent.snapshots import evidence_hash
+        old = {"field": "registry_live", "status": "available", "value": {"name": "X AS"}}
+        new = {"field": "registry_live", "status": "available",
+               "value": {"name": "X AS", "deleted": False, "deleted_on": None}}
+        self.assertEqual(evidence_hash(old), evidence_hash(new))
+        gone = {"field": "registry_live", "status": "available",
+                "value": {"name": "X AS", "deleted": True, "deleted_on": "2026-10-13"}}
+        self.assertNotEqual(evidence_hash(old), evidence_hash(gone))
+
+
+class R3CompareUnknownStatus(unittest.TestCase):
+    def test_no_live_record_is_unknown(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("bv3", ROOT / "scripts" / "build_viewer.py")
+        bv = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bv)
+        rec = bv._compare_record({"organisation_number": "999999999", "profile": {"evidence": {
+            "registry_live": {"status": "not_found"}}}})
+        self.assertEqual(rec["status"], "unknown")
+        rec = bv._compare_record({"organisation_number": "1", "profile": {"evidence": {
+            "registry_live": {"status": "available", "value": {"name": "X"}}}}})
+        self.assertEqual(rec["status"], "active")
+
+
+class R3DnsPoolBounded(unittest.TestCase):
+    def test_shared_pool(self):
+        import signalpost_agent.discover as d
+        self.assertIs(d._dns_pool(), d._dns_pool())
+        self.assertEqual(d._dns_pool()._max_workers, 4)
