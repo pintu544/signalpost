@@ -41,7 +41,10 @@ class SynthesizeRobustnessTests(unittest.TestCase):
             "website_deep": {"status": "available", "value": {"facts": [{"no_field": 1}, "x"]}},
         }
         p = synthesize(_env(evidence=evil))  # must not raise
-        self.assertEqual(len(p["sections"]), 8)
+        # v9: + "What remains unknown" (always present). "What changed"
+        # appears only when a change report is passed in.
+        self.assertEqual(len(p["sections"]), 9)
+        self.assertEqual(p["sections"][-1]["title"], "What remains unknown")
 
     def test_every_sentence_has_evidence_key(self):
         p = synthesize(_env())

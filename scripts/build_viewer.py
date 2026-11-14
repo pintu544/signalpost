@@ -51,7 +51,11 @@ table.cmp tr:first-child th{color:var(--accent)}
 .sec h2{font-size:1.05rem;margin-bottom:.6rem;color:var(--accent)}
 .sec p{margin-bottom:.55rem;font-size:.95rem}
 .ev{font-size:.75rem;color:var(--muted);margin-top:.15rem}
-.ev a{color:var(--muted)}
+.ev a{color:var(--accent)}
+.claim{margin-bottom:.7rem}.claim p{margin-bottom:.1rem}
+.card:focus-visible,.back:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.sec{overflow-x:auto}
+@media(max-width:600px){table.cmp{font-size:.82rem}table.cmp th.rowhead{width:7rem}}
 footer{text-align:center;color:var(--muted);font-size:.8rem;padding:2rem}
 </style>
 </head>
@@ -73,6 +77,8 @@ const list = document.getElementById('list'), detail = document.getElementById('
 function badges(p){
   const s = p.sections.map(x=>x.title);
   let h = '';
+  if(p.compare && p.compare.website) h += '<span class="badge b-info">website</span>';
+  if(p.compare && p.compare.changed_modules > 0) h += '<span class="badge b-warn">changed</span>';
   if(s.includes('News') && !p.sections.find(x=>x.title==='News').sentences[0].text.startsWith('No')) h += '<span class="badge b-info">news</span>';
   if(s.includes('Jobs') && !p.sections.find(x=>x.title==='Jobs').sentences[0].text.startsWith('No')) h += '<span class="badge b-ok">hiring</span>';
   const st = p.sections.find(x=>x.title==='Status').sentences[0].text;
@@ -87,9 +93,12 @@ function renderList(filter){
     .filter(p => !q || p.name.toLowerCase().includes(q) || p.organisation_number.includes(q))
     .map(p => { const idx = DATA.profiles.indexOf(p);
       const checked = compared.has(idx) ? ' checked' : '';
-      return `<div class="card" data-i="${idx}"><label class="cmp-label"><input type="checkbox" class="cmp-check"${checked} onclick="toggleCompare(${idx}, event)"> compare</label><h3>${esc(p.name)}</h3><div class="meta">${esc(p.headline)}<br>${esc(p.organisation_number)}</div><div>${badges(p)}</div></div>`;}).join('')
+      return `<div class="card" data-i="${idx}" tabindex="0" role="button" aria-label="Open profile for ${esc(p.name)}"><label class="cmp-label"><input type="checkbox" class="cmp-check"${checked} onclick="toggleCompare(${idx}, event)" aria-label="Compare ${esc(p.name)}"> compare</label><h3>${esc(p.name)}</h3><div class="meta">${esc(p.headline)}<br>${esc(p.organisation_number)}</div><div>${badges(p)}</div></div>`;}).join('')
     || '<p style="color:var(--muted)">No matches.</p>';
-  list.querySelectorAll('.card').forEach(c => c.onclick = () => showDetail(+c.dataset.i));
+  list.querySelectorAll('.card').forEach(c => {
+    c.onclick = () => showDetail(+c.dataset.i);
+    c.onkeydown = ev => { if((ev.key === 'Enter' || ev.key === ' ') && ev.target === c){ ev.preventDefault(); showDetail(+c.dataset.i); } };
+  });
 }
 const compareBar = document.getElementById('compare-bar');
 const compared = new Set();
@@ -118,14 +127,22 @@ function showCompare(){
   const head = idx.map(i => `<th>${esc(DATA.profiles[i].name)}</th>`).join('');
   const cell = fn => idx.map(i => `<td>${fn(DATA.profiles[i].compare)}</td>`).join('');
   const frow = (label, fn) => `<tr><th class="rowhead">${label}</th>${cell(fn)}</tr>`;
-  detail.innerHTML = `<span class="back" onclick="back()">← all companies</span><h2 style="margin-bottom:1rem">Company comparison</h2><div class="sec"><table class="cmp"><tr><th></th>${head}</tr>` +
+  detail.innerHTML = `<a href="#" class="back" onclick="back();return false;">← all companies</a><h2 style="margin-bottom:1rem">Company comparison</h2><div class="sec"><table class="cmp"><tr><th></th>${head}</tr>` +
     frow('Organisation number', c => esc(c.organisation_number)) +
     frow('Legal form', c => esc(c.legal_form || '—')) +
     frow('Municipality', c => esc(c.municipality || '—')) +
     frow('Latest accounts', c => esc((c.financial && c.financial.year) || '—')) +
     frow('Revenue', c => esc(c.financial ? money(c.financial.revenue) : '—')) +
     frow('Annual result', c => esc(c.financial ? money(c.financial.annual_result) : '—')) +
-    `</table></div>`;
+    frow('Employees (register)', c => esc(c.employees ?? '—')) +
+    frow('Industry', c => esc(c.industry || '—')) +
+    frow('Website', c => c.website && safeUrl(c.website) ? `<a href="${esc(c.website)}" target="_blank" rel="noopener">${esc(c.website)}</a>` : '—') +
+    frow('Registered roles', c => esc(c.roles ?? '—')) +
+    frow('Registered locations', c => esc(c.locations ?? '—')) +
+    frow('News items', c => esc(c.news ?? 0)) +
+    frow('Open job postings', c => esc(c.jobs ?? 0)) +
+    frow('Status', c => esc(c.status || '—')) +
+    `</table></div><p class="ev">Open a company to see the source and retrieval date behind each value.</p>`;
   window.scrollTo(0,0);
 }
 function esc(s){return String(s??'').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
@@ -135,31 +152,64 @@ function safeUrl(u){try{const p=new URL(u,location.href).protocol;return (p==='h
 function showDetail(i){
   const p = DATA.profiles[i];
   list.style.display='none'; detail.style.display='block';
-  detail.innerHTML = `<span class="back" onclick="back()">← all companies</span><h2 style="margin-bottom:1rem">${esc(p.name)} <span style="color:var(--muted);font-weight:normal">${esc(p.organisation_number)}</span></h2>` +
-    p.sections.map(s => `<div class="sec"><h2>${esc(s.title)}</h2>` + s.sentences.map(x => {
-      const u = x.evidence[0]?.url, link = u && safeUrl(u) ? ` · <a href="${esc(u)}" target="_blank" rel="noopener">source link</a>` : (u ? ` · <span title="non-http URL withheld">${esc(u.slice(0,40))}</span>` : '');
-      return `<p>${esc(x.text)}<div class="ev">source: ${esc(x.evidence[0]?.source||'n/a')} · retrieved ${esc((x.evidence[0]?.retrieved_at||'').slice(0,10))}${link}</div></p>`;}).join('') + `</div>`).join('');
+  detail.innerHTML = `<a href="#" class="back" onclick="back();return false;">← all companies</a><h2 style="margin-bottom:1rem">${esc(p.name)} <span style="color:var(--muted);font-weight:normal">${esc(p.organisation_number)}</span></h2>` +
+    p.sections.map(s => `<section class="sec"><h2>${esc(s.title)}</h2>` + s.sentences.map(x => {
+      const refs = (x.evidence||[]).filter(r => r && (r.source || r.url));
+      const ev = refs.map(r => {
+        const u = r.url, link = u && safeUrl(u) ? ` · <a href="${esc(u)}" target="_blank" rel="noopener">open source</a>` : (u ? ` · <span title="non-http URL withheld">${esc(u.slice(0,40))}</span>` : '');
+        return `<div class="ev">source: ${esc(r.source||'n/a')} · retrieved ${esc((r.retrieved_at||'').slice(0,10)) || 'n/a'}${link}</div>`;
+      }).join('');
+      return `<div class="claim"><p>${esc(x.text)}</p>${ev}</div>`;}).join('') + `</section>`).join('');
+  history.replaceState(null, '', '#' + encodeURIComponent(p.organisation_number));
   window.scrollTo(0,0);
 }
-function back(){ renderList(search.value); }
+function back(){ history.replaceState(null, '', location.pathname); renderList(search.value); }
 search.oninput = () => renderList(search.value);
-renderList('');
+document.addEventListener('keydown', ev => {
+  if(ev.key === 'Escape' && detail.style.display === 'block') back();
+});
+// deep link: index.html#<organisation number> opens that profile
+const wanted = decodeURIComponent(location.hash.slice(1));
+const start = wanted ? DATA.profiles.findIndex(p => p.organisation_number === wanted) : -1;
+if(start >= 0) showDetail(start); else renderList('');
 </script>
 </body>
 </html>
 """
 
 
-def _compare_record(envelope: dict) -> dict:
-    """Minimal structured data for the side-by-side comparison view.
+def _count(evidence: dict, module: str, key: str) -> int | None:
+    """Item count of an available evidence list; None when not available."""
+    rec = evidence.get(module)
+    if not isinstance(rec, dict) or rec.get("status") != "available":
+        return None
+    value = rec.get("value")
+    items = value.get(key) if isinstance(value, dict) else None
+    return len(items) if isinstance(items, list) else None
+
+
+def _website(evidence: dict) -> str:
+    for module in ("website", "website_discovered"):
+        rec = evidence.get(module)
+        if isinstance(rec, dict) and rec.get("status") == "available":
+            value = rec.get("value") if isinstance(rec.get("value"), dict) else {}
+            return str(value.get("final_url") or rec.get("source_url") or "")
+    return ""
+
+
+def _compare_record(envelope: dict, changed_modules: int = 0) -> dict:
+    """Structured data for the side-by-side comparison view and badges.
 
     Identity from the envelope profile; latest financials from the
-    (newest-first) normalized records.
+    (newest-first) normalized records; counts only from available
+    evidence (None renders as "—", never as zero).
     """
     prof = envelope.get("profile")
     prof = prof if isinstance(prof, dict) else {}
     evidence = prof.get("evidence")
     evidence = evidence if isinstance(evidence, dict) else {}
+    status = ("bankrupt" if prof.get("bankrupt")
+              else "under liquidation" if prof.get("liquidating") else "active")
     fin = evidence.get("financials")
     records = []
     if isinstance(fin, dict):
@@ -171,6 +221,15 @@ def _compare_record(envelope: dict) -> dict:
         "organisation_number": str(envelope.get("organisation_number") or ""),
         "legal_form": prof.get("legal_form"),
         "municipality": prof.get("municipality"),
+        "employees": prof.get("employees") if isinstance(prof.get("employees"), int) else None,
+        "industry": prof.get("industry_label"),
+        "website": _website(evidence),
+        "roles": _count(evidence, "roles", "roles"),
+        "locations": _count(evidence, "locations", "locations"),
+        "news": _count(evidence, "news", "items") or 0,
+        "jobs": _count(evidence, "jobs", "jobs") or 0,
+        "status": status,
+        "changed_modules": changed_modules,
         "financial": (
             {
                 "year": _financial_year(latest) or None,
@@ -189,14 +248,30 @@ def main() -> None:
     parser.add_argument("--envelopes", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--run-id", default="local")
+    parser.add_argument("--changes", default="",
+                        help="changes.json from the snapshot store (default: next to envelopes)")
     args = parser.parse_args()
+
+    changes_path = Path(args.changes) if args.changes else Path(args.envelopes).with_name("changes.json")
+    changes = None
+    if changes_path.is_file():
+        try:
+            changes = json.loads(changes_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            changes = None
+    per_org: dict[str, int] = {}
+    for change in (changes or {}).get("changes") or []:
+        if isinstance(change, dict):
+            org = str(change.get("organisation_number") or "")
+            per_org[org] = per_org.get(org, 0) + 1
 
     profiles = []
     for line in Path(args.envelopes).read_text(encoding="utf-8").splitlines():
         if line.strip():
             envelope = json.loads(line)
-            profile = synthesize(envelope)
-            profile["compare"] = _compare_record(envelope)
+            profile = synthesize(envelope, changes=changes)
+            org = str(envelope.get("organisation_number") or "")
+            profile["compare"] = _compare_record(envelope, per_org.get(org, 0))
             profiles.append(profile)
     profiles.sort(key=lambda p: p["name"])
 

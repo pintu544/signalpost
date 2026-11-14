@@ -229,7 +229,7 @@ class SummaryTests(unittest.TestCase):
         profile = synthesize(_envelope(evidence))
         self.assertEqual(profile["sections"][0]["title"], "Summary")
         text = _summary_text(profile)
-        self.assertIn("ACME VENTURES AS (123456789) is a AS registered in Oslo.", text)
+        self.assertIn("ACME VENTURES AS (123456789) is an AS registered in Oslo.", text)
         self.assertIn("Business consulting", text)
         self.assertIn("Accounts are on file for 2 years", text)
         self.assertIn("found by web search: https://acme-ventures.no/", text)

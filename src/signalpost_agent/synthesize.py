@@ -75,7 +75,57 @@ def _financial_year(record: dict[str, Any]) -> str:
     return ""
 
 
-def synthesize(envelope: dict[str, Any]) -> dict[str, Any]:
+MODULE_LABELS = {
+    "registry": "Registry record (bulk file)",
+    "registry_live": "Registry record (live)",
+    "accounting_obligation": "Accounting obligation",
+    "financials": "Annual accounts",
+    "roles": "People and roles",
+    "group": "Group structure",
+    "locations": "Registered locations",
+    "website": "Website (from the register)",
+    "website_discovered": "Website (found by discovery)",
+    "website_deep": "Website facts",
+    "social": "Social profiles",
+    "news": "News",
+    "jobs": "Job postings",
+}
+
+# Modules whose absence is worth telling the reader about, in reading order.
+_UNKNOWN_ORDER = ("financials", "roles", "locations", "group", "website",
+                  "website_discovered", "website_deep", "news", "jobs")
+
+_STATUS_WORDS = {
+    "not_found": "not found in checked sources",
+    "not_available": "not found in checked sources",
+    "blocked": "the source refused the request",
+    "source_error": "the source could not be read",
+    "ambiguous": "found, but not certain it is this company, so withheld",
+    "failed": "the check failed",
+    "not_applicable": "does not apply to this company",
+}
+
+_SITE_ORIGIN = {
+    "registry_email": "from the domain of the e-mail address in the register",
+    "name_guess": "at a web address spelled from the legal name",
+    "search": "by web search",
+}
+
+
+def _first_sentence(text: str, limit: int = 220) -> str:
+    """First sentence of a company's own description, trimmed."""
+    text = " ".join(str(text or "").split())
+    if not text:
+        return ""
+    for stop in (". ", "! ", "? "):
+        cut = text.find(stop)
+        if 20 <= cut <= limit:
+            return text[:cut + 1]
+    return text[:limit].rstrip(" ,;:") + ("…" if len(text) > limit else "")
+
+
+def synthesize(envelope: dict[str, Any],
+               changes: dict[str, Any] | None = None) -> dict[str, Any]:
     """Build a deterministic, evidence-cited profile from an envelope.
 
     C3: every evidence access is defensive — malformed shapes degrade to
@@ -206,10 +256,13 @@ def synthesize(envelope: dict[str, Any]) -> dict[str, Any]:
     social_rec = _rec(evidence, "social")
     social_links = [l for l in _val_list(social_rec, "links") if isinstance(l, dict)]
     facts = [f for f in _val_list(deep_rec, "facts") if isinstance(f, dict)]
+    disc_val = disc_rec.get("value") if isinstance(disc_rec.get("value"), dict) else {}
+    disc_origin = _SITE_ORIGIN.get(_str(disc_val.get("candidate_source")) or "search",
+                                   _SITE_ORIGIN["search"])
     if web_rec.get("status") == "available":
         site_rec, site_label = web_rec, "Official website"
     elif disc_rec.get("status") == "available":
-        site_rec, site_label = disc_rec, "Official website (found by web search)"
+        site_rec, site_label = disc_rec, f"Official website (found {disc_origin})"
     else:
         site_rec, site_label = {}, ""
     if site_rec:
@@ -273,12 +326,17 @@ def synthesize(envelope: dict[str, Any]) -> dict[str, Any]:
         s_industry = _str(profile.get("industry_label"))
         intro = f"{name} ({org})"
         if s_legal:
-            intro += f" is a {s_legal}"
+            article = "an" if s_legal[:1].upper() in "AEFHILMNORSX" else "a"
+            intro += f" is {article} {s_legal}"
         if s_muni:
             intro += f" registered in {s_muni}"
         intro += "."
         if s_industry:
             intro += f" Industry: {s_industry}."
+        employees = profile.get("employees")
+        if isinstance(employees, int) and not isinstance(employees, bool):
+            intro += (f" The register lists {employees} employee"
+                      f"{'s' if employees != 1 else ''}.")
         intro_refs = [_ref(reg_rec)]
         if records:
             s_latest = records[0] if isinstance(records[0], dict) else {}
@@ -296,10 +354,17 @@ def synthesize(envelope: dict[str, Any]) -> dict[str, Any]:
                       f"reports revenue {_fmt_money(s_rev)} and result {_fmt_money(s_res)}.")
             intro_refs.append(_ref(fin_rec))
         sum_sents.append((intro, intro_refs))
+        # What the company does, in its own words (company-owned copy:
+        # labelled as such, never presented as an independent finding).
+        about_fact = next((f for f in facts if f.get("field") == "about_text"), None)
+        own_words = _first_sentence(_str(about_fact.get("value"))) if about_fact else ""
+        if site_rec and own_words:
+            sum_sents.append((f"On its own website the company describes itself as: "
+                              f"\u201c{own_words}\u201d", [_ref(deep_rec)]))
         if site_rec:
             s_val = site_rec.get("value") if isinstance(site_rec.get("value"), dict) else {}
             s_url = _str(s_val.get("final_url")) or _str(site_rec.get("source_url"))
-            origin = " in the company register" if site_rec is web_rec else " by web search"
+            origin = " in the company register" if site_rec is web_rec else f" {disc_origin}"
             site_sent = f"A company website was found{origin}: {s_url}."
             site_refs = [_ref(site_rec)]
             if social_links:
@@ -329,6 +394,46 @@ def synthesize(envelope: dict[str, Any]) -> dict[str, Any]:
         sections.insert(0, {"title": "Summary",
                             "sentences": [{"text": t, "evidence": refs}
                                           for t, refs in sum_sents]})
+
+    # 9. What changed since the previous run (snapshot store report).
+    if isinstance(changes, dict):
+        prev_run = _str(changes.get("previous_run_id"))
+        mine = [c for c in (changes.get("changes") or [])
+                if isinstance(c, dict) and _str(c.get("organisation_number")) == org]
+        if not prev_run:
+            change_sents = [("First recorded run for this profile; there is no "
+                             "earlier snapshot to compare with.", [])]
+        elif not mine:
+            change_sents = [(f"No changes since the previous run ({prev_run}).", [])]
+        else:
+            change_sents = []
+            for c in mine:
+                module = _str(c.get("module"))
+                label = MODULE_LABELS.get(module, module or "Unknown module")
+                verb = "added" if c.get("change") == "added" else "changed"
+                change_sents.append((f"{label}: {verb} since run {prev_run}. "
+                                     f"The earlier evidence is kept in the snapshot store.",
+                                     [_ref(_rec(evidence, module))]))
+        section("What changed", change_sents)
+
+    # 10. What remains unknown — every checked module without a usable
+    # result, with the reason, so absence is explicit, never silent.
+    unknown: list[tuple[str, list[dict[str, Any]]]] = []
+    site_known = web_rec.get("status") == "available" or disc_rec.get("status") == "available"
+    for module in _UNKNOWN_ORDER:
+        rec = _rec(evidence, module)
+        status = _str(rec.get("status"))
+        if not rec or status == "available":
+            continue
+        if module in ("website", "website_discovered") and site_known:
+            continue
+        if module == "website_deep" and not site_known:
+            continue
+        reason = _STATUS_WORDS.get(status, status.replace("_", " ") or "unknown")
+        unknown.append((f"{MODULE_LABELS.get(module, module)}: {reason}.", [_ref(rec)]))
+    if not unknown:
+        unknown = [("Every checked source returned a result for this company.", [])]
+    section("What remains unknown", unknown)
 
     legal_form = _str(profile.get("legal_form"))
     muni = _str(profile.get("municipality"))
