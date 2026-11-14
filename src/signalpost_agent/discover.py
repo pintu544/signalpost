@@ -368,10 +368,21 @@ _PARKED_RE = re.compile(
     re.IGNORECASE)
 
 
+_PLACEHOLDER_RE = re.compile(
+    r"\bcoming\s+soon\b|\bunder\s+construction\b|\bkommer\s+snart\b"
+    r"|\bunder\s+(?:oppbygging|arbeid|utvikling)\b|\bnettsiden\s+er\s+under\b",
+    re.IGNORECASE)
+
+
 def is_parked_page(text: str) -> bool:
     """True for registrar parking / domain-for-sale pages (v9 review
-    defect 5): such a page can print a name without being a website."""
-    return bool(_PARKED_RE.search(text or ""))
+    defect 5): such a page can print a name without being a website.
+    A "coming soon" placeholder counts only when the page is nearly
+    empty, so a real site announcing something new is not rejected."""
+    text = text or ""
+    if _PARKED_RE.search(text):
+        return True
+    return bool(_PLACEHOLDER_RE.search(text)) and len(text.split()) < 60
 
 
 FREEMAIL_DOMAINS = {
@@ -460,21 +471,36 @@ def _wildcard_ips() -> set[str]:
     them does not count as existing; this keeps guess yield the same on
     networks with and without wildcard DNS.
     """
-    global _WILDCARD_IPS
+    global _WILDCARD_IPS, DNS_DISCRIMINATES
     if _WILDCARD_IPS is None:
         import uuid
 
-        _WILDCARD_IPS = _lookup(f"sp-{uuid.uuid4().hex[:16]}-nx.no")
+        probes = [_lookup(f"sp-{uuid.uuid4().hex[:16]}-nx.no") for _ in range(2)]
+        _WILDCARD_IPS = set().union(*probes)
+        # Both impossible names resolved to DIFFERENT addresses: this
+        # network synthesises a unique address per name, so DNS cannot
+        # tell real domains from guesses here. (A classic wildcard that
+        # answers one fixed address is still filtered by subset below.)
+        DNS_DISCRIMINATES = not (all(probes) and probes[0].isdisjoint(probes[1]))
     return _WILDCARD_IPS
 
 
+# False once the network is seen to answer every lookup; exposed in the
+# discovery result so a yield difference between environments is
+# explainable. The content gate still decides acceptance either way.
+DNS_DISCRIMINATES = True
+
+
 def _resolves(domain: str) -> bool:
-    """Cheap DNS check before crawling a guessed domain (timeout-bounded,
-    wildcard-DNS aware)."""
+    """Cheap DNS pre-filter before crawling a guessed domain
+    (timeout-bounded, wildcard-DNS aware). On a network that resolves
+    everything it is a no-op: every guess passes to the content gate."""
     addresses = _lookup(domain)
     if not addresses:
         return False
     wildcard = _wildcard_ips()
+    if not DNS_DISCRIMINATES:
+        return True
     return not (wildcard and addresses <= wildcard)
 
 
@@ -639,4 +665,5 @@ def discover_website(
         if len(tried) >= max_candidates:
             break
     return {"found": False, "requests": requests, "queries": queries,
-            "candidates_tried": tried, "rejected": rejected}
+            "candidates_tried": tried, "rejected": rejected,
+            "dns_discriminates": DNS_DISCRIMINATES}

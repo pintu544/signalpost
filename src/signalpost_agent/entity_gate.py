@@ -150,6 +150,8 @@ _NAME_CONTINUATIONS = {
     "partner", "partners", "capital", "ventures", "avd", "avdeling", "filial",
 }
 _EDGE_PUNCT = "©:;,.()\"'«»|·•–—/"
+# hyphen-like characters that glue a name to a neighbour word
+_GLUE = ("-", "\u2010", "\u2011", "\u2012", "\u2013")
 
 
 def _is_name_word(token: str) -> bool:
@@ -180,22 +182,28 @@ def has_standalone_name(legal_name: str, text: str) -> bool:
     pattern = full_legal_name_pattern(legal_name)
     if not pattern or not text:
         return False
+    # Collapse whitespace (incl. NBSP) so a name split across page
+    # elements ("Fritid   AS") still matches.
+    text = " ".join(text.replace("\u00a0", " ").split())
     for match in pattern.finditer(text):
         head = text[:match.start()]
-        if head.endswith("-") or head.endswith("‐"):
+        if head[-1:] in _GLUE:
             continue  # glued prefix: "Tellus-Fritid AS"
         before = head.split()
         prev = before[-1] if before else ""
         prev_clean = prev.strip(_EDGE_PUNCT)
         low = prev_clean.casefold()
         after = text[match.end():].split()
-        nxt = after[0] if after else ""
-        nxt_low = nxt.strip("©:;,.()\"'«»|·•").casefold()
         tail = text[match.end():match.end() + 2]
-        if tail[:1] in ("-", "‐") and tail[1:2].isalpha():
+        if tail[:1] in _GLUE and tail[1:2].isalpha():
             continue  # glued suffix: "Fritid AS-Holding"
-        if nxt_low in _NAME_CONTINUATIONS and nxt[:1] not in ".,;:":
-            continue  # "Fritid AS Holding"
+        # skip pure separator tokens ("Fritid AS - Holding")
+        rest_tokens = [t for t in after[:3] if t.strip("-‐‑–—|·•/")]
+        nxt = rest_tokens[0] if rest_tokens else ""
+        nxt_low = nxt.strip("©:;,.()\"'«»|·•").casefold()
+        if nxt_low in _NAME_CONTINUATIONS and nxt[:1] not in ".,;:" and \
+                not (after and after[0][-1:] in ".,;:"):
+            continue  # "Fritid AS Holding", "Fritid AS - Group"
         if low in _JOINERS or prev in _JOINERS:
             prev2 = before[-2] if len(before) > 1 else ""
             if _is_name_word(prev2) and prev2.strip(_EDGE_PUNCT).casefold() not in _NAME_LEADERS:

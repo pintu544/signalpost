@@ -25,7 +25,11 @@ def _canonical(value: Any) -> str:
 # Fields that change between fetches without meaningful content change
 # (timestamps, analytics, rotating banners) — excluded from hashes to avoid
 # false diffs on idempotent re-runs.
-VOLATILE_FIELDS = {"content_sha256", "main_text_excerpt", "retrieved_at", "latencies_ms"}
+VOLATILE_FIELDS = {"content_sha256", "main_text_excerpt", "retrieved_at", "latencies_ms",
+                   # v9: discovery audit trail (which queries/candidates were
+                   # tried, request counts) varies between identical runs;
+                   # the outcome fields (url, domain, proof) are still hashed.
+                   "queries", "candidates_tried", "rejected", "requests"}
 
 
 def _strip_volatile(value: Any) -> Any:

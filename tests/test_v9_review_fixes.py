@@ -11,6 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from signalpost_agent.discover import discover_website, is_parked_page  # noqa: E402
+# the real resolver, captured at import time (conftest patches it per test)
+from signalpost_agent.discover import _resolves as _REAL_RESOLVES  # noqa: E402
 from signalpost_agent.entity_gate import has_standalone_name, page_identity_proof  # noqa: E402
 from signalpost_agent.jobs import job_from_nav_page, posting_is_closed  # noqa: E402
 from signalpost_agent.news import labelled_publish_date  # noqa: E402
@@ -187,3 +189,141 @@ class Defect8Budget(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --------------------------------------------------------------------------
+# Review round 2 (9888e3c)
+# --------------------------------------------------------------------------
+
+class R2SnapshotStable(unittest.TestCase):
+    def test_discovery_audit_trail_does_not_change_hash(self):
+        from signalpost_agent.snapshots import evidence_hash
+        base = {"field": "website_discovered", "status": "available",
+                "source_type": "search_discovered_company_website",
+                "source_url": "https://www.fyrifish.no/",
+                "value": {"final_url": "https://www.fyrifish.no/", "proof": "legal_name",
+                          "queries": ["FYRI FISH AS 928994058"]}}
+        other = json.loads(json.dumps(base))
+        other["value"]["queries"].append("FYRI FISH EVJE OG HORNNES")
+        other["value"]["candidates_tried"] = ["https://fyrifish.no/"]
+        self.assertEqual(evidence_hash(base), evidence_hash(other))
+        moved = json.loads(json.dumps(base))
+        moved["value"]["final_url"] = "https://fyri.no/"
+        self.assertNotEqual(evidence_hash(base), evidence_hash(moved))
+
+
+class R2WordPressTime(unittest.TestCase):
+    def test_never_edited_post_keeps_its_date(self):
+        html = ('<html><body><h1>Nyhet</h1><time class="entry-date published updated" '
+                'datetime="2026-03-01T10:00:00+00:00">1. mars</time></body></html>')
+        item, reason = extract_site_article(html, "https://x.no/a")
+        self.assertTrue(item and item["published"].startswith("2026-03-01"), reason)
+
+    def test_edited_post_uses_published_not_updated(self):
+        html = ('<html><body><h1>Nyhet</h1>'
+                '<time class="updated" datetime="2026-05-05T10:00:00Z">5 mai</time>'
+                '<time class="entry-date published" datetime="2026-03-01T10:00:00Z">1 mars</time>'
+                '</body></html>')
+        item, _ = extract_site_article(html, "https://x.no/a")
+        self.assertTrue(item["published"].startswith("2026-03-01"))
+
+    def test_publish_class_on_parent(self):
+        html = ('<html><body><h1>Nyhet</h1><span class="post-date">'
+                '<time datetime="2026-03-02T10:00:00Z">2 mars</time></span></body></html>')
+        item, _ = extract_site_article(html, "https://x.no/a")
+        self.assertTrue(item["published"].startswith("2026-03-02"))
+
+    def test_modified_only_still_rejected(self):
+        html = ('<html><body><h1>Nyhet</h1><time class="updated" '
+                'datetime="2026-05-05T10:00:00Z">5 mai</time></body></html>')
+        self.assertEqual(extract_site_article(html, "https://x.no/a"), (None, "modified_only"))
+
+
+class R2CompareDash(unittest.TestCase):
+    def test_unavailable_news_jobs_are_none(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("bv", ROOT / "scripts" / "build_viewer.py")
+        bv = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bv)
+        env = {"organisation_number": "1", "profile": {"evidence": {
+            "news": {"status": "not_found", "value": None},
+            "jobs": {"status": "available", "value": {"jobs": [{"title": "x"}]}}}}}
+        rec = bv._compare_record(env)
+        self.assertIsNone(rec["news"])
+        self.assertEqual(rec["jobs"], 1)
+        self.assertIn("c.news ?? '—'", bv.PAGE_TEMPLATE)
+
+
+class R2ChromeQuote(unittest.TestCase):
+    def test_chrome_skipped(self):
+        from signalpost_agent.synthesize import _first_sentence
+        self.assertEqual(_first_sentence(
+            "Vi bruker informasjonskapsler for å forbedre opplevelsen din. "
+            "Vi leverer hydraulikkservice til industri i Tromsø."),
+            "Vi leverer hydraulikkservice til industri i Tromsø.")
+        self.assertEqual(_first_sentence("Hjem Produkter Om oss Kontakt."), "")
+
+
+class R2NameResiduals(unittest.TestCase):
+    def test_separator_continuations_rejected(self):
+        for text in ("Fritid AS - Holding", "Fritid AS - Group", "Fritid AS — Holding",
+                     "Tellus\u2011Fritid AS", "Fritid AS\u2011Holding"):
+            self.assertFalse(has_standalone_name("FRITID AS", text), text)
+
+    def test_whitespace_split_name_matches(self):
+        self.assertTrue(has_standalone_name("FRITID AS", "Kontakt  Fritid \u00a0  AS, Bergen"))
+        self.assertTrue(has_standalone_name("FRITID AS", "Fritid AS - Hjem"))
+
+
+class R2UnknownNotChecked(unittest.TestCase):
+    def test_recordless_module_listed(self):
+        from signalpost_agent.synthesize import synthesize
+        env = {"organisation_number": "1", "profile": {"name": "X AS", "evidence": {
+            "registry_live": {"status": "available", "value": {"name": "X AS"}}}}}
+        texts = [s["text"] for s in next(sec for sec in synthesize(env)["sections"]
+                                         if sec["title"] == "What remains unknown")["sentences"]]
+        self.assertIn("Annual accounts: not checked in this run.", texts)
+        self.assertIn("Job postings: not checked in this run.", texts)
+
+
+class R2ClosedAndParked(unittest.TestCase):
+    def test_until_further_notice_is_closed(self):
+        self.assertTrue(posting_is_closed("Applications are closed until further notice"))
+        self.assertFalse(posting_is_closed("Applications are closed until 08:00 on Mondays"))
+
+    def test_placeholder_only_when_nearly_empty(self):
+        self.assertTrue(is_parked_page("Kommer snart! Fritid AS"))
+        long_page = "Vi lanserer en ny nettbutikk, kommer snart. " + "Vi leverer varer. " * 30
+        self.assertFalse(is_parked_page(long_page))
+
+
+class R2WildcardDns(unittest.TestCase):
+    def test_synthetic_per_name_ips_make_dns_a_noop(self):
+        from unittest.mock import patch
+
+        import signalpost_agent.discover as d
+        counter = iter(range(1, 100))
+        with patch.object(d, "_lookup", lambda name: {f"198.18.0.{next(counter)}"}), \
+                patch.object(d, "_WILDCARD_IPS", None), patch.object(d, "DNS_DISCRIMINATES", True):
+            self.assertTrue(_REAL_RESOLVES("anything.no"))
+            self.assertFalse(d.DNS_DISCRIMINATES)
+
+    def test_plain_wildcard_ip_is_filtered(self):
+        from unittest.mock import patch
+
+        import signalpost_agent.discover as d
+        answers = {"real.no": {"1.2.3.4"}}
+        with patch.object(d, "_lookup", lambda name: answers.get(name, {"9.9.9.9"})), \
+                patch.object(d, "_WILDCARD_IPS", None), patch.object(d, "DNS_DISCRIMINATES", True):
+            self.assertTrue(_REAL_RESOLVES("real.no"))
+            self.assertFalse(_REAL_RESOLVES("guess.no"))
+
+    def test_nxdomain_network(self):
+        from unittest.mock import patch
+
+        import signalpost_agent.discover as d
+        with patch.object(d, "_lookup", lambda name: {"1.2.3.4"} if name == "real.no" else set()), \
+                patch.object(d, "_WILDCARD_IPS", None), patch.object(d, "DNS_DISCRIMINATES", True):
+            self.assertTrue(_REAL_RESOLVES("real.no"))
+            self.assertFalse(_REAL_RESOLVES("guess.no"))
+            self.assertTrue(d.DNS_DISCRIMINATES)

@@ -139,8 +139,8 @@ function showCompare(){
     frow('Website', c => c.website && safeUrl(c.website) ? `<a href="${esc(c.website)}" target="_blank" rel="noopener">${esc(c.website)}</a>` : '—') +
     frow('Registered roles', c => esc(c.roles ?? '—')) +
     frow('Registered locations', c => esc(c.locations ?? '—')) +
-    frow('News items', c => esc(c.news ?? 0)) +
-    frow('Open job postings', c => esc(c.jobs ?? 0)) +
+    frow('News items', c => esc(c.news ?? '—')) +
+    frow('Open job postings', c => esc(c.jobs ?? '—')) +
     frow('Status', c => esc(c.status || '—')) +
     `</table></div><p class="ev">Open a company to see the source and retrieval date behind each value.</p>`;
   window.scrollTo(0,0);
@@ -151,6 +151,7 @@ function esc(s){return String(s??'').replace(/[&<>"']/g, m => ({'&':'&amp;','<':
 function safeUrl(u){try{const p=new URL(u,location.href).protocol;return (p==='http:'||p==='https:')?u:null;}catch(e){return null;}}
 function showDetail(i){
   const p = DATA.profiles[i];
+  lastOpened = i;
   list.style.display='none'; detail.style.display='block';
   detail.innerHTML = `<a href="#" class="back" onclick="back();return false;">← all companies</a><h2 style="margin-bottom:1rem">${esc(p.name)} <span style="color:var(--muted);font-weight:normal">${esc(p.organisation_number)}</span></h2>` +
     p.sections.map(s => `<section class="sec"><h2>${esc(s.title)}</h2>` + s.sentences.map(x => {
@@ -163,7 +164,14 @@ function showDetail(i){
   history.replaceState(null, '', '#' + encodeURIComponent(p.organisation_number));
   window.scrollTo(0,0);
 }
-function back(){ history.replaceState(null, '', location.pathname); renderList(search.value); }
+let lastOpened = -1;
+function back(){
+  history.replaceState(null, '', location.pathname);
+  renderList(search.value);
+  // return keyboard focus to the card the user came from
+  const card = lastOpened >= 0 ? list.querySelector(`.card[data-i="${lastOpened}"]`) : null;
+  if(card) card.focus();
+}
 search.oninput = () => renderList(search.value);
 document.addEventListener('keydown', ev => {
   if(ev.key === 'Escape' && detail.style.display === 'block') back();
@@ -226,8 +234,8 @@ def _compare_record(envelope: dict, changed_modules: int = 0) -> dict:
         "website": _website(evidence),
         "roles": _count(evidence, "roles", "roles"),
         "locations": _count(evidence, "locations", "locations"),
-        "news": _count(evidence, "news", "items") or 0,
-        "jobs": _count(evidence, "jobs", "jobs") or 0,
+        "news": _count(evidence, "news", "items"),
+        "jobs": _count(evidence, "jobs", "jobs"),
         "status": status,
         "changed_modules": changed_modules,
         "financial": (

@@ -373,14 +373,23 @@ def extract_site_article(html_text: str, url: str) -> tuple[dict[str, Any] | Non
             stamp = time_el.get("datetime") or time_el.get("content")
             props = str(time_el.get("itemprop") or "")
             classes = " ".join(time_el.get("class") or []).casefold()
-            if ("dateModified" in props or re.search(r"modif|updated|endret", classes)):
-                modified_seen = True
-                continue
+            parent = time_el.parent
+            parent_classes = " ".join((parent.get("class") or []) if parent is not None
+                                      and hasattr(parent, "get") else []).casefold()
+            publish_re = (r"\b(?:published|publish|pubdate|post-date|posted-on|"
+                          r"entry-date|publisert|date-published)\b")
             publish_semantics = ("datePublished" in props
                                  or time_el.has_attr("pubdate")
-                                 or re.search(r"\b(?:published|publish|pubdate|post-date|"
-                                              r"entry-date|publisert)\b", classes))
-            if stamp and publish_semantics:
+                                 or re.search(publish_re, classes)
+                                 or re.search(publish_re, parent_classes))
+            # A publish marker wins: WordPress prints a never-edited post
+            # as class="entry-date published updated" (v9 round-2 defect 2).
+            # Only an element WITHOUT publish markers is a modified stamp.
+            if not publish_semantics and (
+                    "dateModified" in props or re.search(r"modif|updated|endret", classes)):
+                modified_seen = True
+                continue
+            if stamp and publish_semantics and "dateModified" not in props:
                 candidate = _iso_date(stamp)
                 if candidate:
                     published = candidate

@@ -8,6 +8,7 @@ an explicit "not found in checked sources" instead of a fabricated claim.
 from __future__ import annotations
 
 import datetime
+import re
 from typing import Any
 
 
@@ -112,16 +113,42 @@ _SITE_ORIGIN = {
 }
 
 
+_CHROME_RE = re.compile(
+    r"informasjonskapsler|cookies?\b|personvern|privacy|samtykke|consent|"
+    r"javascript|nettleser|browser|logg inn|log in|sign in|handlekurv|"
+    r"cart\b|alle rettigheter|all rights reserved|©", re.IGNORECASE)
+_NAV_WORDS = {"hjem", "forside", "home", "meny", "menu", "om", "oss", "kontakt",
+              "produkter", "tjenester", "nyheter", "karriere", "about", "contact",
+              "services", "products", "news", "careers", "english", "norsk", "søk"}
+
+
+def _is_chrome(sentence: str) -> bool:
+    """Cookie banners, login prompts and navigation runs: page chrome,
+    not a company describing itself."""
+    words = re.findall(r"[\wæøåÆØÅ]+", sentence)
+    if len(words) < 5 or _CHROME_RE.search(sentence):
+        return True
+    nav = sum(1 for w in words if w.casefold() in _NAV_WORDS)
+    return nav >= max(3, len(words) // 2)
+
+
 def _first_sentence(text: str, limit: int = 220) -> str:
-    """First sentence of a company's own description, trimmed."""
+    """First real sentence of a company's own description, trimmed.
+
+    Leading chrome (cookie notices, nav text) is skipped; "" when no
+    sentence qualifies, so nothing is quoted rather than chrome.
+    """
     text = " ".join(str(text or "").split())
     if not text:
         return ""
-    for stop in (". ", "! ", "? "):
-        cut = text.find(stop)
-        if 20 <= cut <= limit:
-            return text[:cut + 1]
-    return text[:limit].rstrip(" ,;:") + ("…" if len(text) > limit else "")
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
+        sentence = sentence.strip()
+        if not sentence or _is_chrome(sentence):
+            continue
+        if len(sentence) > limit:
+            sentence = sentence[:limit].rstrip(" ,;:") + "…"
+        return sentence
+    return ""
 
 
 def synthesize(envelope: dict[str, Any],
@@ -423,11 +450,16 @@ def synthesize(envelope: dict[str, Any],
     for module in _UNKNOWN_ORDER:
         rec = _rec(evidence, module)
         status = _str(rec.get("status"))
-        if not rec or status == "available":
+        if status == "available":
             continue
         if module in ("website", "website_discovered") and site_known:
             continue
         if module == "website_deep" and not site_known:
+            continue
+        if module == "website_discovered" and not rec:
+            continue  # discovery runs only when the register has no site
+        if not rec:
+            unknown.append((f"{MODULE_LABELS.get(module, module)}: not checked in this run.", []))
             continue
         reason = _STATUS_WORDS.get(status, status.replace("_", " ") or "unknown")
         unknown.append((f"{MODULE_LABELS.get(module, module)}: {reason}.", [_ref(rec)]))

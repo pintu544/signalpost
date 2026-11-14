@@ -146,7 +146,10 @@ def _application_deadline(text: str) -> datetime.date | None:
 
 
 # "closed on Sundays", "stengt i påsken" are opening hours, not status.
-_NOT_SCHEDULE = (r"(?!\s+(?:on|during|over|for\s+the|at|until|between|på|i|om|"
+# "until further notice" / "inntil videre" is an indefinite closure, so
+# "until" counts as a schedule word only when another word follows.
+_NOT_SCHEDULE = (r"(?!\s+(?:on|during|over|for\s+the|at|until(?!\s+further\s+notice)|"
+                 r"between|på|i(?!nntil\s+videre)|om|"
                  r"mondays?|tuesdays?|wednesdays?|thursdays?|fridays?|saturdays?|"
                  r"sundays?|weekends?|holidays?)\b)")
 _CLOSED_RE = re.compile(
